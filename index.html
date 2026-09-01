@@ -1,0 +1,3220 @@
+<!DOCTYPE html>
+<!--═══════════════════════════════════════════════════════════════════════════
+  M1S QUOTE TRACKER — setup reference (keep this block, it's the only doc)
+
+  CONFIG: search "CONFIG" in the <script> below.
+    clientId   Entra app reg, platform MUST be Single-page application (SPA).
+    SITE_PATH  /sites/Production      LIST_NAME  Quote_Tracker
+    IMG_DRIVE  Documents              IMG_PATH   Quote Sheets/Quote Images
+               (needs /thumb and /full subfolders)
+    Scope: Sites.ReadWrite.All (delegated, admin consent)
+
+  SHAREPOINT COLUMNS — internal names are FIXED at creation, no spaces:
+    Title→Style QuoteDate(date-only) ImgKey Descr Sensitive Brand Category
+    Customer StockProgram Season ActionItem Stage QuoteSheet Notes Archived
+    * Archived is NEW — add it as single line of text, holds "Yes" or blank.
+    * StockProgram is retained in the data but hidden from the grid.
+    * Descr/ActionItem avoid the Description/Action builtin collisions.
+    Index Title, Brand, ActionItem, Stage (5,000-item threshold).
+
+  DROPDOWN VALUES come from the Quote_Lookups list on the same site:
+    Title(text, the value) · LookupType(choice) · SortOrder(number, optional)
+    · Inactive(text, "Yes" retires a value)
+  LookupType choices: Brand Category Customer Season Action Stage Sensitive
+    plus Sequence — see CAD NUMBERS below.
+
+  CAD NUMBERS come from New Quote only — tick "Auto-assign CAD #" and the Style
+  field greys out; the next number in the sequence is taken when Add Quote is
+  pressed, so cancelling the dialog never burns one. There is deliberately NO
+  toolbar button for stamping existing rows. reserveCad(n) still takes n
+  consecutive numbers in one write if that is ever wanted again. The number IS taken before the photo uploads, because the photo
+  files under the style number — a failure after that point burns the number,
+  which is the counter's intended one-way behaviour.
+  The counter is ONE row in Quote_Lookups:
+    Title = CAD · LookupType = Sequence · SortOrder = last number issued
+  "Sequence" must be added to the LookupType choice list first, or SharePoint
+  rejects the value. loadLookups() ignores unknown types, so that row never
+  shows up in a dropdown, the Lists panel or the filter pane. The increment is
+  guarded with the item's ETag and retries on 412, so two people stamping at
+  once cannot take the same number. Numbers are never reissued — deleting a
+  stamped row burns its number permanently. CAD_PAD is a MINIMUM width, so the
+  run continues CAD999 → CAD1000 rather than breaking.
+  Manage them from the "Lists" button — add, rename, retire. Renaming offers to
+  rewrite the rows still holding the old value. If Quote_Lookups is missing the
+  tool silently falls back to learning values from existing rows, so it never
+  hard-fails. Supplier is separate: it reads the Factories list live.
+
+  PREFIX_BRAND maps a style prefix to a brand for filename autofill. Edit it
+  freely. D/F/JA/M/MAR are month-coded quote styles, not brands, so they're
+  intentionally absent.
+
+  ACTION and STAGE hold MULTIPLE values, stored semicolon-separated
+  ("Need Quote; Need Sample"). Filters and counts treat each value separately.
+  Setting Stage to "Done" archives the row automatically (Ctrl+Z undoes it).
+  Removing Done does NOT un-archive — use the Restore button in Archive view.
+  "Done" is always offered in the Stage dropdown even if Quote_Lookups lacks it.
+
+  KEYBOARD: arrows/Tab move · Enter moves down (Shift+Enter up) · F2 or
+  double-click or just type to edit · the ▾ caret at the cell's right edge opens
+  a dropdown · click-drag or shift-click selects a range · Ctrl+D fill ·
+  Ctrl+C/V copy-paste · Ctrl+Z undo · Ctrl+Y or Ctrl+Shift+Z redo · Ctrl+A all ·
+  click-drag selects a range · click # for a row · click header or letter for a
+  column · row checkbox tags for export · photo click = lightbox · Alt+click =
+  replace photo
+
+  Row numbers reflect position in the CURRENT view, so they stay 1..N after
+  filtering or archiving. Internal row identity is separate.
+
+  FROZEN through Description (Date Created, Image, Style, Description), plus the
+  checkbox and row-number columns. A FILL_W-wide blank column sits to the right
+  of the last column and FILL_ROWS blank rows sit under the last data row, so
+  the grid reads like a sheet rather than stopping dead at the last value; both
+  are decoration and are guarded out of the mousedown handler. The header row
+  stays pinned
+  (CSS position:sticky on thead). Column geometry comes from the <colgroup>,
+  never from cell content, so scrolling cannot resize a column. The grid opens
+  scrolled to the bottom, where new quotes land; ⤒ / ⤓ jump to either end. No
+  Save button — autosaves ~1s after typing stops. "+ Row" appends at the bottom
+  and only writes once a field has a value.
+
+  FILTER PANE covers every dropdown column (Action, Stage, Brand, Category,
+  Customer, Season, Sensitive). Each group collapses by clicking its header;
+  the open/shut state and the active-tick count persist in localStorage
+  (qt_sideopen).
+
+  TICKS SURVIVE SEARCHING. applyView() used to prune picked down to the current
+  view, so ticking a row, searching for another and ticking that one dropped the
+  first. Only rows gone from ROWS entirely are dropped now, and exportRows()
+  returns ALL ticked rows rather than just those matching the current search —
+  collecting across several searches is the point of the checkboxes.
+
+  DELETE acts on TICKED rows when any are ticked, falling back to the cursor
+  selection otherwise — the old code always used the selection, which is why
+  ticking five rows deleted only one.
+
+  PASTE fills a selection Excel-style: a copied block smaller than the selected
+  range tiles to fill it, so one cell pasted over 40 selected rows lands in all
+  40. A block matching or exceeding the selection pastes from the cursor at its
+  own size.
+
+  AUTO-REFRESH reloads from SharePoint every 60 minutes, preserving scroll
+  position, cursor and ticked rows. It skips the tick entirely when a save is
+  pending or failed, a cell is being edited, a dialog is open, or the tab is
+  hidden — it waits for the next hour rather than forcing a flush.
+
+  THROTTLING: graph() honours 429/503 with Retry-After (falling back to
+  exponential backoff), retries up to 3 times, and sets throttledUntil. Photo
+  loading and the hourly auto-refresh both check isThrottled() and stand down —
+  background work must never starve the request the user is waiting on. A 429
+  reading "activityLimitReached" means too many requests too fast, not a
+  permissions problem.
+
+  PHOTOS are fetched BY KEY for the viewport only. /children returns the
+  drive's own order — roughly filename order — which has nothing to do with
+  what is on screen, so a listing-based load spent its whole time on rows the
+  user could not see. Order now is: rows in the viewport first (jumped to the
+  front of the queue on every repaint and every scroll), then every remaining
+  photo newest quote first. Twenty keys per Graph $batch, three batches in
+  flight, repaint debounced at 120ms.
+    imgWanted  keys already asked for, hit or miss — stops re-requesting 404s
+    imgQueue   pending chunks; front-loaded for the viewport
+  Individual key lookups are EXPENSIVE against throttling limits: the whole
+  library that way is ~75 batches of 20 requests, versus ~8 for a folder
+  listing — which is exactly what got the tenant throttled off. So by-key is
+  capped at IMG_KEY_CAP (200, the newest quotes), one batch in flight with a
+  250ms gap, and loadBulkThumbs() sweeps the rest with the cheap listing 4s
+  after load. Ordering still holds where it matters: viewport first, then
+  newest, then everything else.
+  A pending photo renders as a shimmer placeholder, NOT an <img> pointed at a
+  path that 404s — that used to fire imgFail for every pending photo on screen
+  and relist the entire library each time. imgFail now re-fetches the single
+  stale key.
+  The full/ folder is NOT fetched at startup — it loads the first time a
+  lightbox is opened. The lightbox shows the thumbnail immediately and swaps in
+  the high-res version when it lands.
+
+  EDITING: clicking inside an already-open cell editor places the caret where
+  you clicked. Double-clicking a cell opens it with the caret under the pointer
+  rather than at the end (caretOffset() measures the cell's own font on a
+  canvas). Typing straight into a cell still replaces the contents.
+
+  TEMPLATE EXPORTS: "PPS Sheet" and "Quote Sheet" reproduce the two circulated
+  workbooks — row heights (130.5pt / 119.25pt), Calibri 11 / 12, thin borders on
+  every cell, centred and middle-aligned. ONE deliberate change from the drafts:
+  the Picture column is 24 chars (~173px) rather than 15 (~110px). At 15 the
+  column was far narrower than the row was tall, so anything but a portrait
+  shot scaled down to a stamp with dead space either side.
+
+  PHOTO PLACEMENT — fitPhoto(), shared by Sample Request, the custom export and
+  both templates. Photo scaled to PHOTO_INSET (0.86) of the estimated cell box
+  and CENTRED in it with fractional anchors; rows keep the template's fixed
+  height. Two dead ends are recorded on the function itself — anchoring on
+  whole-cell integers (photos hug the left border) and growing rows to fit each
+  photo (uneven row heights). Neither is an improvement; do not reintroduce. Geometry
+  lives in TPL_PPS / TPL_QS; a column with no k is deliberately blank for the
+  team or factory to fill (PPS "NAME M/DD", Quote Sheet Package / Qty / Price —
+  the tracker holds none of those fields). Both embed photos in the Picture
+  column and are driven by the row checkboxes.
+
+  DEV TRACKER export is ONE sheet with TWO sections. Top: the 11 tracker
+  columns, one row per selected style. Then two blank rows, then a grouped
+  Quotes block — Date / Factory / File Name / Products / Customer, ONE row per
+  Quote# with every Style # in that quote joined by " , ". The block's start
+  row is ws.rowCount + GAP, never hardcoded, so it follows the data. Both
+  sections share column widths (the block sits in A–E). Nothing in the block
+  wraps — a long Products list runs on in a single line.
+  Duplicate styles within a quote are collapsed; rows with no Quote# group
+  under "(no quote #)".
+
+  EXPORTS: Sample Request (photos, factory-ready) · Dev Tracker rows ·
+  "Export…" for a plain header+table of chosen columns, remembered in
+  localStorage (qt_cxcols). Selecting the Image column embeds the actual photos
+  at true aspect ratio (same path as Sample Request: thumb/ bytes, scaled to
+  the cell box, editAs oneCell), which forces 105pt rows on that sheet. All three are driven strictly by the row checkboxes.
+  The Export column picker holds its own Set (cxSel) and uses explicit rows
+  rather than native <label><input> pairs — the first build leaned on native
+  label toggling and behaved like a radio group, one column at a time.
+  In Sample Request, Artwork Receive Date and SRD ship EMPTY with a real
+  mm/dd/yyyy number format and the MM/DD/YYYY hint in the header label. They
+  used to carry the literal text "MM/DD/YYYY", which made Excel treat the
+  factory's typed date as text so Sample Time never calculated. That formula now
+  reads either a real date or a text one via DATEVALUE.
+
+  ARCHIVE view sorts oldest-first on entry and restores the previous sort on
+  the way out; clicking any header still overrides. Stage Done ⇄ Archive runs
+  BOTH ways (applyDoneRule): marking Done archives, clearing Done restores to
+  Active. It only fires off a Stage edit, so a row archived by hand stays put
+  until somebody edits its Stage — at which point this rule wins and pulls it
+  back to Active.
+
+  FILTER PANE groups all start COLLAPSED (SIDE_OPEN_DEFAULT is empty); the
+  open/shut state is then remembered per user in localStorage.
+═══════════════════════════════════════════════════════════════════════════-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>M1S · Quote Tracker</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<style>
+  :root{
+    --ink:#16202c; --muted:#5f6c7d;
+    --glass:rgba(255,255,255,.62); --edge:rgba(255,255,255,.75);
+    --shadow:0 8px 32px rgba(31,45,75,.12); --accentink:#1b6fae;
+    --design:#f2734a; --grid:rgba(95,108,125,.16); --sel:#1b6fae;
+    --rowh:76px; --imgh:64px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;color:var(--ink);
+    overflow:hidden;background:linear-gradient(135deg,#e8f0fa 0%,#f3eef9 45%,#eaf6f1 100%)}
+  #bgArt{position:fixed;inset:0;z-index:0;opacity:.55;pointer-events:none}
+  .glass{background:var(--glass);backdrop-filter:blur(18px) saturate(1.4);
+    -webkit-backdrop-filter:blur(18px) saturate(1.4);border:1px solid var(--edge);
+    box-shadow:var(--shadow);border-radius:18px}
+
+  #gate{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px;
+    background:linear-gradient(135deg,#e8f0fa 0%,#f3eef9 45%,#eaf6f1 100%)}
+  .gate-card{max-width:380px;width:100%;padding:42px 40px;text-align:center}
+  .gate-card .logo{font-size:13px;letter-spacing:.35em;font-weight:700;color:var(--accentink);margin-bottom:14px}
+  .gate-card h2{font-size:24px;font-weight:700;letter-spacing:-.4px;margin-bottom:8px}
+  .gate-card p{font-size:13.5px;color:var(--muted);line-height:1.55;margin-bottom:24px}
+  .gate-card button{font-family:inherit;font-size:14px;font-weight:600;padding:12px 28px;border-radius:13px;
+    border:1px solid var(--edge);cursor:pointer;color:#fff;
+    background:linear-gradient(135deg,#2f9bd6,#1b6fae);box-shadow:0 6px 20px rgba(31,111,174,.35)}
+  .gate-err{margin-top:14px;font-size:12px;color:#b4452f;min-height:16px}
+  .gate-sub{margin-top:18px;font-size:11px;color:var(--muted)}
+
+  #app{position:relative;z-index:1;height:100vh;display:flex;flex-direction:column;padding:12px clamp(8px,1vw,16px) 9px}
+  header.bar{display:flex;align-items:center;gap:10px;padding:6px 12px;margin-bottom:6px;flex:0 0 auto;
+    flex-wrap:wrap;row-gap:6px}
+  header.bar .tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;row-gap:6px;flex:1 1 auto;
+    padding:0;margin:0;background:none;border:0;box-shadow:none;backdrop-filter:none}
+  h1{font-size:14.5px;font-weight:700;letter-spacing:-.2px;white-space:nowrap}
+  /* user badge on one line instead of two — the stacked version was setting
+     the whole bar's height */
+  .who{margin-left:auto;display:flex;align-items:center;gap:9px;font-size:12px;
+    color:var(--muted);white-space:nowrap}
+  .who b{color:var(--ink);font-weight:600}
+  .signout{font-size:11.5px;color:var(--muted);text-decoration:underline;cursor:pointer;background:none;border:none;font-family:inherit}
+
+  .mid{flex:1 1 auto;display:flex;gap:9px;min-height:0}
+
+  /* sidebar */
+  #side{flex:0 0 210px;display:flex;flex-direction:column;padding:11px 12px;overflow-y:auto;transition:flex-basis .16s}
+  #side.col{flex-basis:42px;padding:11px 6px;overflow:hidden}
+  .sideh{display:flex;align-items:center;gap:7px;margin-bottom:12px;flex:0 0 auto}
+  .sideh .t{font-size:12px;font-weight:700;letter-spacing:.02em}
+  .sideh button{margin-left:auto;border:1px solid var(--edge);background:rgba(255,255,255,.8);
+    width:23px;height:23px;border-radius:7px;cursor:pointer;font-family:inherit;font-size:12px;color:var(--muted);flex:0 0 auto}
+  #side.col .sideh .t,#side.col .sgrp,#side.col .sfoot{display:none}
+  #cx{position:fixed;inset:0;background:rgba(22,32,44,.34);backdrop-filter:blur(4px);
+    display:none;align-items:center;justify-content:center;z-index:60;padding:20px}
+  #cx.open{display:flex}
+  .cx-tools{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .cx-hint{margin-left:auto;font-size:11px;color:var(--muted)}
+  .cx-list{max-height:290px;overflow:auto;border:1px solid rgba(22,32,44,.12);border-radius:10px;
+    padding:6px;background:rgba(255,255,255,.5);margin-bottom:14px}
+  /* blank grid past the data — same lines, nothing interactive */
+  td.fillc,th.fillc{background:rgba(255,255,255,.34);border-left:1px solid var(--grid)}
+  th.fillc{background:rgba(240,245,251,.97)}
+  tr.fillr td{height:30px;background:rgba(255,255,255,.34);cursor:default}
+  tr.fillr:hover td{background:rgba(255,255,255,.34)}
+  .imgwait{display:block;width:100%;height:var(--imgh);border-radius:8px;
+    background:linear-gradient(100deg,rgba(95,108,125,.06) 30%,rgba(95,108,125,.13) 50%,rgba(95,108,125,.06) 70%);
+    background-size:220% 100%;animation:imgsh 1.5s linear infinite}
+  @keyframes imgsh{0%{background-position:120% 0}100%{background-position:-120% 0}}
+  @media (prefers-reduced-motion:reduce){.imgwait{animation:none}}
+  .cxrow{display:flex;align-items:center;gap:8px;font-size:12px;padding:6px 8px;
+    border-radius:7px;cursor:pointer;user-select:none;outline:none}
+  .cxrow:hover{background:rgba(255,255,255,.85)}
+  .cxrow:focus-visible{box-shadow:0 0 0 2px rgba(47,155,214,.5)}
+  .cxrow .bx{font-size:14px;line-height:1;color:var(--muted);flex:0 0 auto}
+  .cxrow.on{background:rgba(47,155,214,.1)}
+  .cxrow.on .bx{color:#155f96}
+  .cxrow .sfx{margin-left:auto;color:var(--muted);font-size:10.5px}
+  .sgrp{margin-bottom:14px}
+  .sgrp>.lbl{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);
+    margin-bottom:5px;display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none;
+    padding:2px 3px;border-radius:6px}
+  .sgrp>.lbl:hover{background:rgba(255,255,255,.8);color:var(--ink)}
+  .sgrp>.lbl .cv{font-size:9px;transition:transform .16s ease;flex:0 0 auto}
+  .sgrp>.lbl .on{margin-left:auto;background:rgba(47,155,214,.18);color:#155f96;border-radius:999px;
+    padding:0 5px;font-size:9px;letter-spacing:0;font-variant-numeric:tabular-nums}
+  .sgrp.shut>.lbl .cv{transform:rotate(-90deg)}
+  .sgrp.shut>div:last-child{display:none}
+  /* Brand and Customer run long — cap each group and scroll inside it so the
+     pane itself never becomes a mile of checkboxes */
+  .sgrp>div:last-child{max-height:210px;overflow-y:auto;overflow-x:hidden}
+  @media (prefers-reduced-motion:reduce){.sgrp>.lbl .cv{transition:none}}
+  .sopt{display:flex;align-items:center;gap:7px;font-size:11.5px;padding:3px 5px;border-radius:7px;cursor:pointer;line-height:1.3}
+  .sopt:hover{background:rgba(255,255,255,.8)}
+  .sopt input{margin:0;flex:0 0 auto;cursor:pointer}
+  .sopt .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sopt .ct{margin-left:auto;color:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums;flex:0 0 auto}
+  .sopt.z{opacity:.42}
+  .sfoot{margin-top:auto;padding-top:10px;border-top:1px dashed rgba(95,108,125,.3);flex:0 0 auto}
+  .sfoot button{font-family:inherit;font-size:11.5px;color:var(--accentink);background:none;border:none;cursor:pointer;padding:2px 0}
+
+  .right{flex:1 1 auto;display:flex;flex-direction:column;min-width:0;min-height:0}
+  .btn{font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 13px;border-radius:11px;
+    border:1px solid var(--edge);background:rgba(255,255,255,.75);cursor:pointer;color:var(--ink);white-space:nowrap}
+  .btn:hover{background:#fff}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.primary{color:#fff;background:linear-gradient(135deg,#2f9bd6,#1b6fae)}
+  .btn.sm{padding:6px 10px;font-size:11.5px}
+  .search{font-family:inherit;font-size:13px;padding:8px 12px;border-radius:11px;border:1px solid var(--edge);
+    background:rgba(255,255,255,.8);color:var(--ink);width:210px;outline:none}
+  .search:focus{background:#fff;box-shadow:0 0 0 3px rgba(47,155,214,.18)}
+  /* pill slider: an absolutely positioned thumb glides to the active button */
+  .seg{position:relative;display:flex;border:1px solid var(--edge);border-radius:999px;
+    background:rgba(233,239,247,.85);padding:2px;isolation:isolate}
+  .seg .segthumb{position:absolute;top:2px;bottom:2px;left:0;width:0;border-radius:999px;
+    background:#fff;box-shadow:0 2px 7px rgba(31,45,75,.16);
+    transition:left .2s cubic-bezier(.4,0,.2,1),width .2s cubic-bezier(.4,0,.2,1);z-index:-1}
+  .seg button{position:relative;font-family:inherit;font-size:11.5px;font-weight:600;padding:6px 13px;
+    border:0;background:none;cursor:pointer;color:var(--muted);border-radius:999px;transition:color .15s;
+    white-space:nowrap}
+  .seg button.on{color:var(--accentink)}
+  .seg button:hover:not(.on){color:var(--ink)}
+  .tsep{width:1px;height:22px;background:var(--grid);margin:0 2px}
+  .jump{display:flex;gap:3px}
+  .jump .btn{padding:6px 9px;font-size:14px;line-height:1}
+  .tlbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.13em;color:var(--muted);font-weight:700}
+
+  /* grid */
+  .gridwrap{flex:1 1 auto;overflow:auto;border-radius:16px;border:1px solid var(--edge);
+    background:rgba(255,255,255,.55);backdrop-filter:blur(18px) saturate(1.4);
+    -webkit-backdrop-filter:blur(18px) saturate(1.4);box-shadow:var(--shadow);min-height:0}
+  /* fixed layout + a colgroup + an explicit width: column geometry comes only
+     from the <col> elements, so re-rendering rows can never resize a column */
+  table{border-collapse:separate;border-spacing:0;table-layout:fixed;font-size:12.5px}
+  tbody{user-select:none;-webkit-user-select:none}
+  tbody input,tbody select,tbody textarea{user-select:text;-webkit-user-select:text}
+  thead tr.lrow th{position:sticky;top:0;z-index:5;height:18px;padding:0;
+    font-size:9.5px;font-weight:600;color:var(--muted);background:rgba(228,235,244,.99);
+    border-right:1px solid var(--grid);border-bottom:1px solid var(--grid);text-align:center;
+    user-select:none;cursor:pointer}
+  thead tr.lrow th.stky,thead tr.lrow th.chk,thead tr.lrow th.num{z-index:8;
+    background:rgba(222,231,243,.995)}
+  thead tr.lrow th.lsel{background:rgba(47,155,214,.28);color:var(--accentink)}
+  thead tr#hrow th{position:sticky;top:18px;z-index:4;background:rgba(240,245,251,.97);
+    font-size:11px;font-weight:700;text-align:center;padding:0;color:var(--ink);
+    border-bottom:1.5px solid rgba(95,108,125,.3);border-right:1px solid var(--grid);user-select:none}
+  thead th .hin{display:flex;align-items:center;justify-content:center;gap:3px;padding:8px 5px;cursor:pointer}
+  thead th .hlab{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  thead th .hlab.wraph{white-space:normal;text-overflow:clip;line-height:1.14;text-align:center}
+  thead th .sb{font-size:8px;color:var(--muted);opacity:.5;cursor:pointer;padding:2px;border-radius:4px;flex:0 0 auto}
+  thead th .sb:hover{opacity:1;background:rgba(47,155,214,.18)}
+  thead th .sb.on{opacity:1;color:var(--accentink)}
+  thead th .fbtn{font-size:8px;opacity:.4;cursor:pointer;padding:2px;border-radius:4px;flex:0 0 auto}
+  thead th .fbtn:hover{opacity:1;background:rgba(47,155,214,.18)}
+  thead th .fbtn.act{opacity:1;color:#b4452f}
+  thead th.hsel{background:rgba(47,155,214,.2)}
+  .rez{position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;z-index:6}
+  td{padding:0;border-bottom:1px solid var(--grid);border-right:1px solid var(--grid);
+    background:rgba(255,255,255,.5);height:var(--rowh);position:relative;
+    text-align:center;vertical-align:middle;overflow:hidden}
+  td .cv{padding:4px 7px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    display:flex;align-items:center;justify-content:center;gap:4px;height:100%}
+  td.multi .cv{flex-wrap:wrap;white-space:normal;gap:3px;align-content:center}
+  tbody tr:hover td{background:rgba(255,255,255,.78)}
+  td.chk{position:sticky;z-index:3;background:#eef3f9;width:34px;cursor:pointer}
+  td.chk input,thead th.chk input{margin:0;cursor:pointer;width:14px;height:14px}
+  thead tr#hrow th.chk{z-index:7;background:rgba(234,240,248,.995);width:34px}
+  tbody tr:hover td.chk{background:#e4ecf6}
+  td.num{position:sticky;z-index:3;background:#eef3f9;
+    font-size:10.5px;color:var(--muted);font-weight:600;width:44px;cursor:pointer}
+  td.num:hover{background:#cbe1f3}
+  tbody tr:hover td.num{background:#e4ecf6}
+  td.stk{position:sticky;z-index:3;background:#f7fafd}
+  tbody tr:hover td.stk{background:#eff5fb}
+  thead tr#hrow th.num{z-index:7;background:rgba(234,240,248,.995);cursor:pointer}
+  thead tr#hrow th.stky{z-index:7;background:rgba(238,243,250,.995)}
+  td.sel{box-shadow:inset 0 0 0 2px var(--sel);z-index:6}
+  /* solid, never translucent — a see-through frozen cell lets the scrolled
+     columns underneath bleed straight through it */
+  td.inrange{background:#dceaf8}
+  td.chk.inrange,td.num.inrange{background:#cadff4}
+  td.stk.inrange{background:#d5e6f7}
+  tbody tr:hover td.inrange{background:#d3e5f7}
+  tr.picked td{background:#d9e9f8}
+  tr.picked td.num{background:#bfd9f2;color:var(--accentink)}
+  tr.picked td.stk{background:#dceaf8}
+  td.dirty::after{content:"";position:absolute;top:2px;right:2px;width:0;height:0;
+    border-left:6px solid transparent;border-top:6px solid var(--design)}
+  td.pickable{cursor:pointer}
+  td.pickable .caret{position:absolute;top:0;right:0;width:22px;height:100%;
+    display:flex;align-items:center;justify-content:center;font-size:13px;line-height:1;
+    color:var(--muted);opacity:.6;cursor:pointer;border-left:1px solid rgba(95,108,125,.12)}
+  td.pickable:hover .caret{opacity:1;background:rgba(47,155,214,.14);color:var(--accentink)}
+  td.pickable .cv{padding-right:24px}
+  .spacer td{border:0;background:none;padding:0;height:auto}
+  .thumb{height:var(--imgh);width:auto;max-width:100%;border-radius:7px;object-fit:contain;cursor:zoom-in;
+    background:#fff;box-shadow:0 2px 7px rgba(31,45,75,.14);display:block;margin:auto}
+  .thumb:hover{transform:scale(1.04)}
+  .noimg{font-size:9.5px;color:var(--muted);letter-spacing:.06em}
+  .addimg{cursor:copy;color:var(--accentink);font-weight:700;padding:5px 7px;border-radius:7px;
+    border:1px dashed rgba(47,155,214,.5);font-size:9.5px;letter-spacing:.05em}
+  .addimg:hover{background:rgba(47,155,214,.12)}
+  .cellin{width:100%;height:100%;font-family:inherit;font-size:12.5px;border:0;outline:none;
+    padding:4px 6px;background:#fff;color:var(--ink);text-align:center;box-shadow:inset 0 0 0 2px var(--sel)}
+  select.cellin{cursor:pointer}
+  .pill{font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:7px;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:100%}
+
+  /* filter menu */
+  #fmenu{position:fixed;z-index:80;width:242px;max-height:396px;display:none;flex-direction:column;padding:10px;border-radius:14px}
+  #fmenu.open{display:flex}
+  #fmenu input[type=text]{font-family:inherit;font-size:12px;padding:7px 9px;border-radius:9px;
+    border:1px solid var(--edge);background:#fff;outline:none;margin-bottom:7px;width:100%}
+  #fmenu .flist{overflow-y:auto;flex:1;margin-bottom:8px}
+  #fmenu label{display:flex;align-items:center;gap:7px;font-size:11.5px;padding:3px 5px;border-radius:6px;
+    cursor:pointer;text-align:left;line-height:1.3}
+  #fmenu label:hover{background:rgba(255,255,255,.9)}
+  #fmenu label input{margin:0;flex:0 0 auto}
+  #fmenu label .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #fmenu label .ct{margin-left:auto;color:var(--muted);font-size:10.5px;font-variant-numeric:tabular-nums;flex:0 0 auto}
+  #fmenu .frow{display:flex;gap:5px}
+
+  /* multi-value picker */
+  #mpick{position:fixed;z-index:82;width:236px;max-height:340px;display:none;flex-direction:column;
+    padding:10px;border-radius:14px}
+  #mpick.open{display:flex}
+  #mpick .mp-head{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;
+    color:var(--muted);margin-bottom:7px}
+  #mpick .mp-list{overflow-y:auto;flex:1;margin-bottom:8px}
+  #mpick label{display:flex;align-items:center;gap:8px;font-size:12px;padding:4px 5px;border-radius:7px;
+    cursor:pointer;text-align:left;line-height:1.3}
+  #mpick label:hover{background:rgba(255,255,255,.9)}
+  #mpick label input{margin:0;flex:0 0 auto;width:14px;height:14px}
+  #mpick .mp-foot{display:flex;gap:6px}
+
+  /* new quote */
+  #nq{position:fixed;inset:0;z-index:88;display:none;align-items:center;justify-content:center;
+    background:rgba(22,32,44,.5);backdrop-filter:blur(7px);padding:3vh 3vw}
+  #nq.open{display:flex}
+  .nq-card{width:min(880px,96vw);max-height:92vh;overflow-y:auto;padding:24px 28px;position:relative}
+  .nq-card h3{font-size:19px;font-weight:700;letter-spacing:-.3px;margin-bottom:3px}
+  .nq-card .sub{font-size:12.5px;color:var(--muted);margin-bottom:18px}
+  .nq-grid{display:grid;grid-template-columns:240px 1fr 1fr;gap:13px 15px;align-items:start}
+  .fld{display:flex;flex-direction:column;gap:5px}
+  label.ck.nqcad{display:flex;align-items:center;gap:7px;margin-top:3px;font-size:11px;
+    font-weight:500;text-transform:none;letter-spacing:0;color:var(--muted);cursor:pointer}
+  label.ck.nqcad input{width:14px;height:14px;margin:0;cursor:pointer}
+  #nq_style:disabled{background:rgba(95,108,125,.08);color:var(--muted)}
+  .fld label{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--muted)}
+  .fld input,.fld select,.fld textarea{font-family:inherit;font-size:13px;padding:8px 10px;border-radius:10px;
+    border:1px solid var(--edge);background:rgba(255,255,255,.85);color:var(--ink);outline:none;width:100%}
+  .fld input:focus,.fld select:focus,.fld textarea:focus{background:#fff;box-shadow:0 0 0 3px rgba(47,155,214,.18)}
+  .fld textarea{resize:vertical;min-height:62px}
+  .fld.wide{grid-column:2/4}
+  .drop{grid-row:1/5;border:2px dashed rgba(47,155,214,.45);border-radius:14px;min-height:240px;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;cursor:pointer;
+    background:rgba(255,255,255,.5);text-align:center;padding:12px;overflow:hidden}
+  .drop:hover,.drop.hot{border-color:var(--accentink);background:rgba(47,155,214,.09)}
+  .drop img{max-width:100%;max-height:220px;border-radius:10px;object-fit:contain}
+  .drop .dh{font-size:13px;font-weight:600}
+  .drop .dp{font-size:11.5px;color:var(--muted);line-height:1.5}
+  .nq-foot{display:flex;align-items:center;gap:9px;margin-top:18px;padding-top:15px;border-top:1px dashed rgba(95,108,125,.3)}
+  .nq-foot .err{font-size:12px;color:#b4452f;flex:1}
+  #nqClose{position:absolute;top:13px;right:13px;width:30px;height:30px;border-radius:50%;
+    border:1px solid var(--edge);background:rgba(255,255,255,.9);cursor:pointer;font-size:13px;color:var(--ink);font-family:inherit}
+  @media(max-width:820px){.nq-grid{grid-template-columns:1fr 1fr}.drop{grid-row:auto;grid-column:1/3;min-height:160px}.fld.wide{grid-column:1/3}}
+
+  /* sample request dialog */
+  #sr{position:fixed;inset:0;z-index:89;display:none;align-items:center;justify-content:center;
+    background:rgba(22,32,44,.5);backdrop-filter:blur(7px);padding:3vh 3vw}
+  #sr.open{display:flex}
+  .sr-card{width:min(560px,96vw);max-height:92vh;overflow-y:auto;padding:24px 26px;position:relative}
+  .sr-card h3{font-size:19px;font-weight:700;letter-spacing:-.3px;margin-bottom:3px}
+  .sr-card .sub{font-size:12.5px;color:var(--muted);margin-bottom:18px;line-height:1.5}
+  .sr-grid{display:grid;grid-template-columns:1fr 1fr;gap:13px 15px}
+  .sr-grid .wide{grid-column:1/3}
+  #srClose{position:absolute;top:13px;right:13px;width:30px;height:30px;border-radius:50%;
+    border:1px solid var(--edge);background:rgba(255,255,255,.9);cursor:pointer;font-size:13px;color:var(--ink);font-family:inherit}
+  #srProg{font-size:12px;color:var(--muted);flex:1}
+  .sr-card label.ck{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:500;
+    text-transform:none;letter-spacing:0;color:var(--ink);cursor:pointer}
+  .sr-card label.ck input{width:15px;height:15px;margin:0;cursor:pointer}
+
+  /* manage lists */
+  #lk{position:fixed;inset:0;z-index:87;display:none;align-items:center;justify-content:center;
+    background:rgba(22,32,44,.5);backdrop-filter:blur(7px);padding:4vh 3vw}
+  #lk.open{display:flex}
+  .lk-card{width:min(720px,96vw);max-height:88vh;display:flex;flex-direction:column;
+    padding:24px 26px;position:relative}
+  .lk-card h3{font-size:19px;font-weight:700;letter-spacing:-.3px;margin-bottom:3px}
+  .lk-card .sub{font-size:12px;color:var(--muted);margin-bottom:16px}
+  .lk-body{display:flex;gap:16px;min-height:0;flex:1}
+  .lk-types{flex:0 0 140px;display:flex;flex-direction:column;gap:3px}
+  .lk-types button{font-family:inherit;font-size:12.5px;font-weight:600;text-align:left;
+    padding:8px 11px;border-radius:10px;border:1px solid transparent;background:none;cursor:pointer;
+    color:var(--muted)}
+  .lk-types button:hover{background:rgba(255,255,255,.75)}
+  .lk-types button.on{background:rgba(255,255,255,.95);border-color:var(--edge);color:var(--accentink)}
+  .lk-types button .n{float:right;font-weight:500;opacity:.6;font-size:11px}
+  .lk-vals{flex:1;display:flex;flex-direction:column;min-width:0}
+  .lk-add{display:flex;gap:7px;margin-bottom:10px}
+  .lk-add input{flex:1;font-family:inherit;font-size:13px;padding:8px 11px;border-radius:10px;
+    border:1px solid var(--edge);background:rgba(255,255,255,.85);outline:none;color:var(--ink)}
+  .lk-add input:focus{background:#fff;box-shadow:0 0 0 3px rgba(47,155,214,.18)}
+  .lk-list{flex:1;overflow-y:auto;border:1px solid var(--edge);border-radius:12px;
+    background:rgba(255,255,255,.5);padding:5px}
+  .lkrow{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;font-size:12.5px}
+  .lkrow:hover{background:rgba(255,255,255,.9)}
+  .lkrow .v{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lkrow.off .v{opacity:.45;text-decoration:line-through}
+  .lkrow .u{font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .lkrow button{font-family:inherit;font-size:10.5px;font-weight:600;padding:3px 8px;border-radius:7px;
+    border:1px solid var(--edge);background:rgba(255,255,255,.8);cursor:pointer;color:var(--ink)}
+  .lkrow button:hover{background:#fff}
+  #lkClose{position:absolute;top:13px;right:13px;width:30px;height:30px;border-radius:50%;
+    border:1px solid var(--edge);background:rgba(255,255,255,.9);cursor:pointer;font-size:13px;
+    color:var(--ink);font-family:inherit}
+
+  /* lightbox */
+  #lb{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;
+    background:rgba(22,32,44,.62);backdrop-filter:blur(8px)}
+  #lb.open{display:flex}
+  .lb-card{width:min(1180px,95vw);height:min(93vh,1000px);display:flex;overflow:hidden;border-radius:18px;position:relative}
+  .lb-img{flex:1 1 auto;background:#fff;display:flex;align-items:center;justify-content:center;padding:14px;min-width:0}
+  .lb-img img{max-width:100%;max-height:100%;object-fit:contain}
+  .lb-meta{flex:0 0 286px;padding:22px 20px;overflow-y:auto;background:rgba(255,255,255,.72);border-left:1px solid var(--edge)}
+  .lb-meta h3{font-size:17px;font-weight:700;letter-spacing:-.3px;margin-bottom:3px}
+  .lb-meta .sub{font-size:12.5px;color:var(--muted);margin-bottom:15px;line-height:1.5}
+  .lb-meta dl{display:grid;grid-template-columns:auto 1fr;gap:7px 10px;font-size:12px}
+  .lb-meta dt{color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.09em;font-size:9.5px;padding-top:2px}
+  .lb-meta dd{font-weight:500;word-break:break-word;white-space:pre-wrap}
+  .lb-nav{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;
+    border:1px solid var(--edge);background:rgba(255,255,255,.94);cursor:pointer;font-size:16px;font-family:inherit;color:var(--ink)}
+  #lbPrev{left:12px} #lbNext{right:300px}
+  #lbClose{position:absolute;top:11px;right:11px;z-index:5;width:32px;height:32px;border-radius:50%;
+    border:1px solid var(--edge);background:rgba(255,255,255,.94);cursor:pointer;font-size:14px;color:var(--ink);font-family:inherit}
+  @media(max-width:900px){.lb-meta{display:none}#lbNext{right:12px}}
+
+  /* loading overlay */
+  #load{position:fixed;inset:0;z-index:70;display:none;flex-direction:column;align-items:center;
+    justify-content:center;gap:16px;background:linear-gradient(135deg,#e8f0fa 0%,#f3eef9 45%,#eaf6f1 100%)}
+  #load.on{display:flex}
+  #load .card{padding:34px 46px;text-align:center;border-radius:20px}
+  #load .logo{font-size:12px;letter-spacing:.34em;font-weight:700;color:var(--accentink);margin-bottom:16px}
+  #load .spin{width:34px;height:34px;margin:0 auto 15px;border-radius:50%;
+    border:3px solid rgba(47,155,214,.22);border-top-color:var(--accentink);animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  #load .msg{font-size:13px;color:var(--muted);font-weight:600}
+  #load .bar{margin-top:14px;height:3px;width:190px;border-radius:2px;background:rgba(95,108,125,.18);overflow:hidden}
+  #load .bar i{display:block;height:100%;width:30%;border-radius:2px;background:var(--accentink);animation:sl 1.3s ease-in-out infinite}
+  @keyframes sl{0%{margin-left:-30%}100%{margin-left:100%}}
+
+  .status{display:flex;align-items:center;gap:15px;padding:6px 15px;margin-top:8px;flex:0 0 auto;
+    font-size:11.5px;color:var(--muted);border-radius:12px}
+  .status b{color:var(--ink);font-weight:600}
+  .status .rt{margin-left:auto;display:flex;gap:13px;align-items:center}
+  .dotl{width:7px;height:7px;border-radius:50%;background:#36a37a;display:inline-block;margin-right:5px}
+  .dotl.off{background:#e0a92e}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(80px);z-index:95;
+    padding:11px 19px;border-radius:12px;font-size:13px;font-weight:600;transition:.24s;opacity:0;
+    background:rgba(22,32,44,.92);color:#fff}
+  .toast.on{transform:translateX(-50%) translateY(0);opacity:1}
+</style>
+</head>
+<body>
+<canvas id="bgArt"></canvas>
+
+<div id="gate">
+  <div class="gate-card glass">
+    <div class="logo">METRO1</div>
+    <h2>Quote Tracker</h2>
+    <p>Sign in with your Metro1 account to load and edit the quote tracker.</p>
+    <button id="signin">Sign in with Microsoft</button>
+    <div class="gate-err" id="gateErr"></div>
+    <div class="gate-sub" id="gateSub"></div>
+  </div>
+</div>
+
+<div id="load">
+  <div class="card glass">
+    <div class="logo">METRO1</div>
+    <div class="spin"></div>
+    <div class="msg" id="loadMsg">Connecting…</div>
+    <div class="bar"><i></i></div>
+  </div>
+</div>
+
+<div id="app" style="display:none">
+  <header class="bar glass">
+    <h1>M1S Quote Tracker</h1>
+    <div class="tools">
+      <input class="search" id="q" placeholder="Search all columns…">
+      <div class="seg" id="viewseg">
+        <i class="segthumb"></i>
+        <button data-v="active" class="on">Active</button>
+        <button data-v="arch">Archive</button>
+        <button data-v="all">All</button>
+      </div>
+      <button class="btn sm" id="archBtn">Archive</button>
+      <div class="seg" id="rowseg">
+        <i class="segthumb"></i>
+        <button data-r="34" data-i="26">S</button>
+        <button data-r="76" data-i="64" class="on">M</button>
+        <button data-r="132" data-i="118">L</button>
+        <button data-r="210" data-i="194">XL</button>
+      </div>
+      <div class="tsep"></div>
+      <button class="btn primary" id="newQuote">+ New Quote</button>
+      <button class="btn sm" id="addRow">+ Row</button>
+      <button class="btn sm" id="delRow">Delete</button>
+      <button class="btn sm" id="undo" disabled>↶ Undo</button>
+      <button class="btn sm" id="redo" disabled>↷ Redo</button>
+      <div class="tsep"></div>
+      <button class="btn sm" id="expSR">Sample Request</button>
+      <button class="btn sm" id="expDev">Dev Tracker</button>
+      <button class="btn sm" id="expCustom" title="Export chosen columns as a plain table">Export…</button>
+      <button class="btn sm" id="expPPS" title="PPS comments sheet with photos">PPS Sheet</button>
+      <button class="btn sm" id="expQS" title="Quote sheet with photos">Quote Sheet</button>
+      <div class="jump">
+        <button class="btn sm" id="jTop" title="Jump to the top">⤒</button>
+        <button class="btn sm" id="jBot" title="Jump to the bottom">⤓</button>
+      </div>
+      <button class="btn sm" id="lkBtn">Lists</button>
+      <button class="btn sm" id="reload">Reload</button>
+    </div>
+    <div class="who"><b id="uName">—</b><button class="signout" id="signout">Sign out</button></div>
+  </header>
+
+  <div class="mid">
+    <aside id="side" class="glass">
+      <div class="sideh">
+        <span class="t">Filters</span>
+        <button id="sideTog" title="Collapse">‹</button>
+      </div>
+      <div id="sideBody"></div>
+      <div class="sfoot"><button id="sideClear">Clear all filters</button></div>
+    </aside>
+
+    <div class="right">
+      <div class="gridwrap" id="gw">
+        <table id="tbl">
+          <colgroup id="cg"></colgroup>
+          <thead><tr id="lrow" class="lrow"></tr><tr id="hrow"></tr></thead>
+          <tbody id="body"></tbody>
+        </table>
+      </div>
+
+      <div class="status glass">
+        <span><b id="sShown">0</b> of <b id="sTotal">0</b> rows</span>
+        <span id="sCell">—</span>
+        <span id="sDirty"></span>
+        <span id="sSave" style="cursor:default"></span>
+        <div class="rt">
+          <span id="sMode"><span class="dotl"></span>—</span>
+          <span>Enter edit · Ctrl+D fill · Ctrl+C/V copy·paste · Ctrl+Z undo · Ctrl+click row # to tag for export</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="mpick" class="glass">
+  <div class="mp-head" id="mpTitle">Action</div>
+  <div class="mp-list" id="mpList"></div>
+  <div class="mp-foot">
+    <button class="btn sm" id="mpAdd" style="flex:1.1">＋ New</button>
+    <button class="btn sm" id="mpClear" style="flex:1">Clear</button>
+    <button class="btn sm primary" id="mpDone" style="flex:1.2">Done</button>
+  </div>
+</div>
+
+<div id="fmenu" class="glass">
+  <input type="text" id="fsearch" placeholder="Search values…">
+  <div class="flist" id="flist"></div>
+  <div class="frow">
+    <button class="btn sm" id="fall" style="flex:1">All</button>
+    <button class="btn sm" id="fnone" style="flex:1">None</button>
+    <button class="btn sm primary" id="fapply" style="flex:1.2">Apply</button>
+  </div>
+</div>
+
+<div id="nq">
+  <div class="nq-card glass">
+    <button id="nqClose">✕</button>
+    <h3>New Quote</h3>
+    <div class="sub">The photo is resized and filed under the style number automatically.</div>
+    <div class="nq-grid" id="nqGrid">
+      <div class="drop" id="nqDrop">
+        <div class="dh">Drop a photo here</div>
+        <div class="dp">or click to browse<br>PNG · JPG</div>
+      </div>
+    </div>
+    <div class="nq-foot">
+      <div class="err" id="nqErr"></div>
+      <button class="btn" id="nqCancel">Cancel</button>
+      <button class="btn primary" id="nqSave">Add Quote</button>
+    </div>
+  </div>
+</div>
+
+<div id="sr">
+  <div class="sr-card glass">
+    <button id="srClose">✕</button>
+    <h3>Create Request Files</h3>
+    <div class="sub" id="srCount">—</div>
+    <div class="sub" style="margin-top:-8px;margin-bottom:14px;font-size:11.5px">
+      Artwork Receive Date, SRD and Notes ship blank and date-formatted;
+      Sample Time calculates itself once the factory fills the two dates.</div>
+    <div class="sr-grid">
+      <div class="fld"><label>Supplier</label>
+        <select id="sr_supplier"><option value="">Loading factories…</option></select></div>
+      <div class="fld"><label>Sample Qty Needed</label><input id="sr_qty" autocomplete="off"></div>
+      <div class="fld wide"><label>Sample Type <span style="font-weight:400;text-transform:none;letter-spacing:0">(Dev Tracker only)</span></label>
+        <select id="sr_sampletype">
+          <option>Artwork Sample</option><option>Benchmark Sample</option>
+          <option>Factory Sample</option><option value=""></option>
+        </select></div>
+      <div class="fld wide" style="gap:7px">
+        <label>Create</label>
+        <label class="ck"><input type="checkbox" id="sr_doSR" checked> Sample Request file (with photos)</label>
+        <label class="ck"><input type="checkbox" id="sr_doDev"> Development Tracker rows</label>
+      </div>
+    </div>
+    <div class="nq-foot">
+      <div id="srProg"></div>
+      <button class="btn" id="srCancel">Cancel</button>
+      <button class="btn primary" id="srGo">Create Files</button>
+    </div>
+  </div>
+</div>
+
+<div id="cx">
+  <div class="sr-card glass">
+    <button id="cxClose">✕</button>
+    <h3>Custom Export</h3>
+    <div class="sub" id="cxCount">—</div>
+    <div class="sub" style="margin-top:-8px;margin-bottom:12px;font-size:11.5px">
+      Plain table — header row plus the ticked rows. Include the Image column
+      and the photos are embedded in it.</div>
+    <div class="cx-tools">
+      <button class="btn sm" id="cxAll">All</button>
+      <button class="btn sm" id="cxNone">None</button>
+      <span class="cx-hint" id="cxPicked">—</span>
+    </div>
+    <div class="cx-list" id="cxList"></div>
+    <div class="nq-foot">
+      <div id="cxProg"></div>
+      <button class="btn" id="cxCancel">Cancel</button>
+      <button class="btn primary" id="cxGo">Export</button>
+    </div>
+  </div>
+</div>
+
+<div id="lk">
+  <div class="lk-card glass">
+    <button id="lkClose">✕</button>
+    <h3>Manage Dropdown Lists</h3>
+    <div class="sub" id="lkSrc">—</div>
+    <div class="lk-body">
+      <div class="lk-types" id="lkTypes"></div>
+      <div class="lk-vals">
+        <div class="lk-add">
+          <input id="lkNew" placeholder="Add a value…" autocomplete="off">
+          <button class="btn sm primary" id="lkAdd">Add</button>
+        </div>
+        <div class="lk-list" id="lkList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="lb">
+  <div class="lb-card glass">
+    <button id="lbClose">✕</button>
+    <button class="lb-nav" id="lbPrev">‹</button>
+    <button class="lb-nav" id="lbNext">›</button>
+    <div class="lb-img"><img id="lbImg" alt=""></div>
+    <div class="lb-meta">
+      <h3 id="lbStyle">—</h3>
+      <div class="sub" id="lbDesc"></div>
+      <dl id="lbDl"></dl>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fpick" accept="image/*" style="display:none">
+<div class="toast" id="toast"></div>
+
+<script>
+/* ═══════════════════ CONFIG ═══════════════════ */
+const MSAL_CONFIG={auth:{
+  clientId:"2c044f47-751e-4b89-9c4e-4fa2b07d1ff6",
+  authority:"https://login.microsoftonline.com/eeea7e3e-9ccb-4a16-894e-3417c6a7a4c1",
+  redirectUri:window.location.href.split('?')[0].split('#')[0]},
+  cache:{cacheLocation:"localStorage",storeAuthStateInCookie:false}};
+const GRAPH_SCOPES=["openid","profile","email","Sites.ReadWrite.All"];
+const SP_HOST="met1sol.sharepoint.com";
+const SITE_PATH="/sites/Production";
+const LIST_NAME="Quote_Tracker";
+const IMG_DRIVE="Documents";
+const IMG_PATH="Quote Sheets/Quote Images";
+const IMG_BASE="images";
+const LOOKUP_LIST="Quote_Lookups";
+/* LookupType choice value  →  tracker column key */
+const LOOKUP_TYPES={Brand:'brand',Category:'category',Customer:'customer',
+  Season:'season',Action:'action',Stage:'stage',Sensitive:'sensitive'};
+const SEED_URL="data/quotes.json";
+const TEST_MODE=MSAL_CONFIG.auth.clientId.indexOf("PASTE_")===0;
+const encPath=p=>p.split('/').map(encodeURIComponent).join('/');
+
+const FIELD={style:"Title",date:"QuoteDate",img:"ImgKey",desc:"Descr",sensitive:"Sensitive",
+  brand:"Brand",category:"Category",customer:"Customer",sop:"StockProgram",season:"Season",
+  action:"ActionItem",stage:"Stage",sheet:"QuoteSheet",note:"Notes",
+  archived:"Archived"};   /* add an "Archived" single-line text column to the list */
+
+const COLS=[
+  {k:'date',h:'Date Created',w:98,t:'date',sticky:1},
+  {k:'img',h:'Image',w:130,t:'img',sticky:1},
+  {k:'style',h:'Style',w:108,t:'text',sticky:1},
+  {k:'desc',h:'Description',w:200,t:'text',sticky:1},
+  {k:'sensitive',h:'Design/Color Sensitive',w:78,t:'sel',wraph:1},
+  {k:'brand',h:'Brand',w:150,t:'sel'},
+  {k:'category',h:'Category',w:118,t:'sel'},
+  {k:'customer',h:'Customer',w:106,t:'sel'},
+  {k:'season',h:'Season',w:98,t:'sel'},
+  {k:'action',h:'Action',w:170,t:'sel',pill:'action',multi:1},
+  {k:'stage',h:'Stage',w:186,t:'sel',pill:'stage',multi:1},
+  {k:'sheet',h:'Quote Sheet Name',w:126,t:'text'},
+  {k:'note',h:'Note',w:250,t:'text'}
+];
+const CHOICES={sensitive:["Yes","No"],sop:["Stock","Program"],
+  season:["NA","Valentines","Christmas","Spring","Summer","Fall","Holiday"],
+  action:["Need Quote","Need Sample","Need Sample/Quote","Need Factory Sample Model","Updated Artwork","Updated Artwork For MP"],
+  stage:["Quoted","Received Pricing","Need to Review Pricing","Arranged Artwork Sample","Arranged Artwork Sampling","Other(See Notes)"],
+  brand:[],category:[],customer:[]};
+const PILL={
+  action:{"Need Quote":["rgba(224,169,46,.18)","#8c6208"],"Need Sample":["rgba(47,155,214,.16)","#155f96"],
+    "Need Sample/Quote":["rgba(148,102,214,.16)","#6b3fae"],"Need Factory Sample Model":["rgba(54,163,122,.16)","#1d7a55"],
+    "Updated Artwork":["rgba(242,115,74,.16)","#b4452f"],"Updated Artwork For MP":["rgba(242,115,74,.24)","#96371f"]},
+  stage:{"Quoted":["rgba(54,163,122,.18)","#1d7a55"],"Received Pricing":["rgba(54,163,122,.12)","#1d7a55"],
+    "Need to Review Pricing":["rgba(224,169,46,.18)","#8c6208"],"Arranged Artwork Sample":["rgba(47,155,214,.14)","#155f96"],
+    "Arranged Artwork Sampling":["rgba(47,155,214,.14)","#155f96"],"Other(See Notes)":["rgba(95,108,125,.14)","#5f6c7d"]}};
+/* style prefix → brand, learned from the tracker; edit freely.
+   D / F / JA / M / MAR are month-coded quote styles, not brands — left out. */
+const PREFIX_BRAND={
+  BJ:'Bath Journey', EM:'Elizabeth Madden', GLM:'Glamourific', HK:'Hugs & Kisses',
+  J:'Juliette & Co.', JB:'Joe Boxer', LL:'La Lueur', MB:'Marabella',
+  MT:'Makeup Techniques', OC:'Olivia & Co', PBW:'Pure Beauty Works',
+  RM:'Ruby & Millie', SR:'Summer Rain', SV:'Stone & Veil'
+};
+const DONE_STAGE='Done';   /* setting Stage to this archives the row */
+/* every dropdown column gets a filter group; collapsed state persists */
+const SIDE_GROUPS=[{k:'action',h:'Action'},{k:'stage',h:'Stage'},{k:'brand',h:'Brand'},
+  {k:'category',h:'Category'},{k:'customer',h:'Customer'},{k:'season',h:'Season'},
+  {k:'sensitive',h:'Design/Color Sensitive'}];
+const SIDE_OPEN_DEFAULT=[];   /* all groups start collapsed */
+/* CAD auto-numbering — counter lives in Quote_Lookups as the single row
+   Title=CAD, LookupType=Sequence, SortOrder=<last issued>. Numbers burn on
+   delete and are never reissued. */
+const CAD_PREFIX='CAD',CAD_PAD=3,CAD_SEQ_TITLE='CAD',CAD_SEQ_TYPE='Sequence';
+
+/* ═══════════════════ STATE ═══════════════════ */
+let msalApp=null,account=null,LOCAL=false;
+let siteId=null,listId=null,driveId=null,imgMap={},imgRefreshing=null;
+let lookupListId=null,lookups={},lookupsOk=false;
+/* real internal field names, discovered at runtime — SharePoint mangles any
+   name typed with a space ("Lookup Type" → Lookup_x0020_Type) */
+let LKF={type:'LookupType',sort:'SortOrder',inactive:'Inactive'};
+let ROWS=[],VIEW=[],dirty=new Set(),deleted=[],undoStack=[];
+let sortK=null,sortDir=1,filters={},side={},query="",viewMode='active';
+let redoStack=[];
+let cur={r:0,c:0},anchor=null,editing=false,editEl=null,editPrev=null,fmenuCol=null;
+let picked=new Set();
+let ROWH=76,winA=0,winB=0;
+let rowHEff=null,remeasuring=false;   /* borders make a row ~1px taller than ROWH */
+const $=id=>document.getElementById(id);
+const MULTI_SEP='; ';
+const tokens=v=>String(v==null?'':v).split(/\s*;\s*/).map(x=>x.trim()).filter(Boolean);
+const joinTokens=a=>a.join(MULTI_SEP);
+const isMulti=k=>{const c=COLS.find(x=>x.k===k);return !!(c&&c.multi);};
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const loadMsg=m=>{const e=$('loadMsg');if(e)e.textContent=m;};
+const showLoad=m=>{loadMsg(m||'Loading…');$('load').classList.add('on');};
+const hideLoad=()=>$('load').classList.remove('on');
+function toast(m,ms){const t=$('toast');t.textContent=m;t.classList.add('on');
+  clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('on'),ms||2200);}
+function fmtDate(v){if(!v)return"";const d=new Date(v);if(isNaN(d))return String(v);
+  return (d.getUTCMonth()+1)+'/'+d.getUTCDate()+'/'+d.getUTCFullYear();}
+function toISO(s){if(!s)return"";const d=new Date(s);return isNaN(d)?"":d.toISOString().slice(0,10);}
+function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){}}
+
+/* ═══════════════════ BACKGROUND ═══════════════════ */
+(function(){const c=$('bgArt'),x=c.getContext('2d');let W,H;
+  function fit(){W=c.width=innerWidth;H=c.height=innerHeight;}fit();addEventListener('resize',fit);
+  let seed=20260610;const rnd=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+  const hues=[[47,155,214],[148,102,214],[54,163,122],[242,115,74]],pts=[];
+  for(let i=0;i<70;i++){const h=hues[Math.floor(rnd()*hues.length)];
+    pts.push({x:rnd()*innerWidth,y:rnd()*innerHeight,s:.25+rnd()*.4,c:h,r:.6+rnd()*1.4});}
+  let t=0;
+  (function tick(){t++;x.fillStyle='rgba(245,247,250,0.045)';x.fillRect(0,0,W,H);
+    pts.forEach(p=>{const a=Math.sin(p.x*.0016+t*.00012)*1.7+Math.cos(p.y*.0019-t*.00009)*1.7;
+      p.x+=Math.cos(a)*p.s;p.y+=Math.sin(a)*p.s;
+      if(p.x<-10)p.x=W+10;if(p.x>W+10)p.x=-10;if(p.y<-10)p.y=H+10;if(p.y>H+10)p.y=-10;
+      x.beginPath();x.arc(p.x,p.y,p.r,0,7);
+      x.fillStyle='rgba('+p.c[0]+','+p.c[1]+','+p.c[2]+',0.18)';x.fill();});
+    requestAnimationFrame(tick);})();
+})();
+
+/* ═══════════════════ AUTH ═══════════════════ */
+$('signin').onclick=()=>{if(TEST_MODE)return startLocal();msalApp.loginRedirect({scopes:GRAPH_SCOPES});};
+$('signout').onclick=()=>{if(LOCAL){location.reload();return;}msalApp.logoutRedirect();};
+function startLocal(){LOCAL=true;account={name:"Demo user"};enter();}
+
+async function boot(){
+  if(TEST_MODE){$('gateSub').textContent="Demo mode — no client ID configured.";
+    $('signin').textContent="Open demo (local data)";return;}
+  msalApp=new msal.PublicClientApplication(MSAL_CONFIG);
+  try{
+    const res=await msalApp.handleRedirectPromise();
+    if(res&&res.account)account=res.account;
+    else{const a=msalApp.getAllAccounts();if(a.length)account=a[0];}
+  }catch(e){$('gateErr').textContent=e.message||String(e);return;}
+  if(account)enter();
+}
+/* fresh token per call — MSAL serves from cache and renews silently when stale */
+async function getToken(){
+  try{return (await msalApp.acquireTokenSilent({scopes:GRAPH_SCOPES,account,forceRefresh:false})).accessToken;}
+  catch(e){msalApp.acquireTokenRedirect({scopes:GRAPH_SCOPES});throw e;}
+}
+/* Set when SharePoint throttles us (429/503). Everything optional — photo
+   fetching above all — checks this and stands down, so a background job can
+   never starve the thing the user is actually waiting for. */
+let throttledUntil=0;
+const isThrottled=()=>Date.now()<throttledUntil;
+async function graph(url,opt,retry,attempt){
+  const o=Object.assign({},opt||{});
+  o.headers=Object.assign({Authorization:'Bearer '+(await getToken()),'Content-Type':'application/json'},o.headers||{});
+  const r=await fetch(url,o);
+  if(r.status===401&&!retry){
+    try{await msalApp.acquireTokenSilent({scopes:GRAPH_SCOPES,account,forceRefresh:true});}catch(e){}
+    return graph(url,opt,1,attempt);
+  }
+  /* 429 activityLimitReached / 503 — honour Retry-After, then back off */
+  if((r.status===429||r.status===503)){
+    const ra=parseInt(r.headers.get('Retry-After')||'',10);
+    const waitS=isNaN(ra)?Math.min(60,Math.pow(2,(attempt||0)+2)):ra;
+    throttledUntil=Date.now()+waitS*1000;
+    if((attempt||0)<3){
+      toast('SharePoint is throttling — waiting '+waitS+'s',Math.min(waitS*1000,6000));
+      await new Promise(res=>setTimeout(res,waitS*1000));
+      return graph(url,opt,retry,(attempt||0)+1);
+    }
+  }
+  if(!r.ok)throw new Error(r.status+' '+(await r.text()).slice(0,300));
+  return r.status===204?null:r.json();
+}
+
+async function enter(){
+  $('gate').style.display='none';
+  showLoad('Connecting to SharePoint…');
+  $('app').style.display='flex';
+  $('uName').textContent=account.name||account.username||'—';
+  $('sMode').innerHTML=LOCAL?'<span class="dotl off"></span>Local demo (read-only)'
+    :'<span class="dotl"></span>SharePoint · '+LIST_NAME;
+  buildHead();await load();
+}
+
+/* ═══════════════════ SHAREPOINT ═══════════════════ */
+async function resolveList(){
+  if(listId)return;
+  if(!siteId)siteId=(await graph('https://graph.microsoft.com/v1.0/sites/'+SP_HOST+':'+SITE_PATH+'?$select=id')).id;
+  const l=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists?$select=id,name,displayName');
+  const hit=l.value.find(x=>x.name===LIST_NAME||x.displayName===LIST_NAME);
+  if(!hit)throw new Error('List "'+LIST_NAME+'" not found on '+SITE_PATH);
+  listId=hit.id;
+}
+async function resolveLookups(){
+  if(lookupListId)return;
+  if(!siteId)siteId=(await graph('https://graph.microsoft.com/v1.0/sites/'+SP_HOST+':'+SITE_PATH+'?$select=id')).id;
+  const l=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists?$select=id,name,displayName');
+  const hit=l.value.find(x=>x.name===LOOKUP_LIST||x.displayName===LOOKUP_LIST);
+  if(!hit)throw new Error('List "'+LOOKUP_LIST+'" not found');
+  lookupListId=hit.id;
+  /* Match on a normalised name so spaces, underscores, _x0020_ and a trailing
+     SharePoint disambiguation digit (LookupType0) all resolve. System columns
+     are excluded first — DocIcon's display name is literally "Type". */
+  const cols=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+
+    lookupListId+'/columns?$select=name,displayName');
+  const SYS=['id','contenttype','modified','created','author','editor','attachments','edit',
+    'docicon','itemchildcount','folderchildcount','appauthor','appeditor','linktitle',
+    'linktitlenomenu','complianceassetid','title','order','guid','filesystemobjecttype'];
+  const nm=x=>String(x||'').replace(/_x0020_/g,'').replace(/[^a-z0-9]/gi,'').toLowerCase();
+  const bs=x=>nm(x).replace(/\d+$/,'');
+  const usable=cols.value.filter(c=>!c.name.startsWith('_')&&SYS.indexOf(nm(c.name))<0);
+  const find=cands=>{
+    for(const want of cands){                       /* priority order matters */
+      const w=nm(want);
+      for(const c of usable)if(bs(c.name)===w||bs(c.displayName)===w)return c.name;
+    }
+    return null;
+  };
+  LKF.type=find(['LookupType','Type','Lookup']);
+  LKF.sort=find(['SortOrder','Sort']);
+  LKF.inactive=find(['Inactive','Retired','Disabled']);
+  if(!LKF.type)throw new Error('No LookupType-style column on '+LOOKUP_LIST+
+    '. Columns present: '+usable.map(c=>c.name).join(', '));
+  console.log('Quote_Lookups fields →',JSON.stringify(LKF));
+}
+/* Values come from Quote_Lookups when it's reachable. If it isn't, the tool
+   falls back to learning from existing rows so nothing breaks. */
+async function loadLookups(){
+  lookupsOk=false;
+  try{
+    await resolveLookups();
+    const out={};
+    const sel=['Title',LKF.type,LKF.sort,LKF.inactive].filter(Boolean).join(',');
+    let url='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+lookupListId+
+            '/items?$expand=fields($select='+sel+')&$top=999';
+    while(url){
+      const p=await graph(url);
+      p.value.forEach(it=>{
+        const f=it.fields||{};
+        const raw=String(f[LKF.type]||'').trim();
+        const key=LOOKUP_TYPES[raw];
+        if(!key||!f.Title)return;
+        const sv=LKF.sort?f[LKF.sort]:null;
+        (out[key]=out[key]||[]).push({id:it.id,title:String(f.Title).trim(),type:raw,
+          sort:(sv===0||sv)?Number(sv):null,
+          inactive:LKF.inactive?String(f[LKF.inactive]||'').trim().toLowerCase()==='yes':false});
+      });
+      url=p['@odata.nextLink']||null;
+    }
+    for(const k in out)out[k].sort((a,b)=>
+      (a.sort==null)-(b.sort==null)||(a.sort-b.sort)||a.title.localeCompare(b.title));
+    lookups=out;lookupsOk=true;
+  }catch(e){console.warn('Quote_Lookups unavailable, learning from rows instead:',e.message);}
+}
+const activeLookup=k=>(lookups[k]||[]).filter(x=>!x.inactive).map(x=>x.title);
+
+async function resolveDrive(){
+  if(driveId)return;
+  if(!siteId)siteId=(await graph('https://graph.microsoft.com/v1.0/sites/'+SP_HOST+':'+SITE_PATH+'?$select=id')).id;
+  const d=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/drives?$select=id,name');
+  const hit=d.value.find(x=>x.name===IMG_DRIVE)||d.value[0];
+  if(!hit)throw new Error('No document library on '+SITE_PATH);
+  driveId=hit.id;
+}
+/* ── image links ───────────────────────────────────────────────────────
+   The old version fetched every page of BOTH thumb/ and full/ before a single
+   photo appeared, and each entry carries a long pre-authenticated URL, so the
+   grid sat photo-less for the whole round trip.
+
+   Now: thumb/ only at startup, paged in batches, repainting after each batch
+   so photos fill in progressively instead of all at the end. full/ is only
+   needed by the lightbox, so it loads the first time one is opened. */
+const IMG_PAGE=200;
+const IMG_BATCH=20;            /* Graph's JSON batch ceiling */
+const IMG_PARALLEL=1;          /* one at a time — see the throttling note */
+const IMG_KEY_CAP=200;         /* most keys we will ever fetch individually */
+let fullMapLoaded=null;
+async function loadFolderMap(sub,onBatch){
+  await resolveDrive();
+  const m={};
+  let url='https://graph.microsoft.com/v1.0/drives/'+driveId+'/root:/'+
+          encPath(IMG_PATH)+'/'+sub+':/children?$top='+IMG_PAGE;
+  while(url){
+    const p=await graph(url);
+    let n=0;
+    p.value.forEach(it=>{const u=it['@microsoft.graph.downloadUrl'];
+      if(u){m[sub+'/'+it.name.replace(/\.[^.]+$/,'')]=u;n++;}});
+    url=p['@odata.nextLink']||null;
+    if(onBatch&&n)onBatch(m,!url);
+  }
+  return m;
+}
+/* ── targeted thumbnail fetch ──────────────────────────────────────────
+   /children comes back in the drive's own order — near enough to filename
+   order — which has nothing to do with what is on screen or how new a quote
+   is. Fetching by key instead lets us choose the order: whatever is in the
+   viewport first, then the rest newest-first. Twenty keys per Graph batch. */
+const imgWanted=new Set();     /* keys already requested, hit or miss */
+let imgQueue=[],imgRunning=0,imgRepaint=null;
+function scheduleRepaint(){
+  if(imgRepaint)return;
+  imgRepaint=setTimeout(()=>{imgRepaint=null;renderWindow(1);},120);
+}
+async function fetchThumbChunk(keys){
+  const reqs=keys.map((k,i)=>({id:String(i+1),method:'GET',
+    url:'/drives/'+driveId+'/root:/'+encPath(IMG_PATH)+'/thumb/'+encodeURIComponent(k)+'.jpg'}));
+  const res=await graph('https://graph.microsoft.com/v1.0/$batch',
+    {method:'POST',body:JSON.stringify({requests:reqs})});
+  let got=0;
+  (res.responses||[]).forEach(r=>{
+    if(r.status!==200||!r.body)return;                 /* 404 = no photo filed */
+    const u=r.body['@microsoft.graph.downloadUrl'];
+    if(u){imgMap['thumb/'+keys[+r.id-1]]=u;got++;}
+  });
+  return got;
+}
+async function pumpImgQueue(){
+  if(isThrottled()){                       /* stand down, come back later */
+    setTimeout(pumpImgQueue,Math.max(1000,throttledUntil-Date.now()));
+    return;
+  }
+  while(imgRunning<IMG_PARALLEL&&imgQueue.length){
+    const chunk=imgQueue.shift();
+    imgRunning++;
+    fetchThumbChunk(chunk)
+      .then(got=>{if(got)scheduleRepaint();})
+      .catch(e=>console.warn('Thumb batch failed:',e.message))
+      .finally(()=>{imgRunning--;setTimeout(pumpImgQueue,250);});
+  }
+}
+/* front=true jumps the queue — used for whatever just scrolled into view */
+function queueThumbs(keys,front){
+  const want=[];
+  keys.forEach(k=>{
+    if(!k||imgMap['thumb/'+k]||imgWanted.has(k))return;
+    imgWanted.add(k);want.push(k);
+  });
+  if(!want.length)return;
+  /* Individual key lookups are what got the tenant throttled — a full library
+     this way is ~75 batches of 20 requests, against 8 for a folder listing.
+     Only the viewport is worth that cost; the bulk load uses the listing. */
+  if(!front&&want.length>IMG_KEY_CAP)want.length=IMG_KEY_CAP;
+  const chunks=[];
+  for(let i=0;i<want.length;i+=IMG_BATCH)chunks.push(want.slice(i,i+IMG_BATCH));
+  imgQueue=front?chunks.concat(imgQueue):imgQueue.concat(chunks);
+  pumpImgQueue();
+}
+/* rows on screen right now, straight to the front of the queue */
+function queueVisibleThumbs(){
+  if(LOCAL||!driveId)return;
+  const keys=[];
+  for(let i=Math.max(0,winA-4);i<Math.min(VIEW.length,winB+4);i++){
+    const r=VIEW[i];if(r&&r.img)keys.push(r.img);
+  }
+  queueThumbs(keys,true);
+}
+/* The newest IMG_KEY_CAP quotes by key (ordered, fast, small), then ONE cheap
+   folder listing for the entire remaining library. The listing is unordered but
+   costs ~8 requests instead of ~75 batches, which is the difference between
+   working and being throttled off the tenant. */
+function queueRestByDate(){
+  if(LOCAL)return;
+  const rest=ROWS.filter(r=>r.img)
+    .slice()
+    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')))
+    .map(r=>r.img);
+  queueThumbs(rest,false);
+}
+let bulkDone=false;
+async function loadBulkThumbs(){
+  if(bulkDone||LOCAL)return;
+  bulkDone=true;
+  try{
+    await loadFolderMap('thumb',(m)=>{Object.assign(imgMap,m);scheduleRepaint();});
+  }catch(e){bulkDone=false;console.warn('Thumb listing failed:',e.message);}
+}
+async function loadImgMap(){
+  try{
+    await resolveDrive();
+    queueVisibleThumbs();
+    queueRestByDate();
+    /* let the grid and the viewport photos settle before the bulk sweep */
+    setTimeout(loadBulkThumbs,4000);
+  }catch(e){console.warn('Image library unreachable:',e.message);}
+}
+/* lightbox needs the high-res folder; fetched once, on first open */
+function ensureFullMap(){
+  if(fullMapLoaded)return fullMapLoaded;
+  fullMapLoaded=loadFolderMap('full').then(m=>{Object.assign(imgMap,m);return m;})
+    .catch(e=>{console.warn('Full-size images unreachable:',e.message);fullMapLoaded=null;});
+  return fullMapLoaded;
+}
+/* one shared refresh when a link has expired, then repaint */
+function refreshImages(){
+  if(LOCAL||imgRefreshing)return imgRefreshing;
+  imgWanted.clear();
+  imgRefreshing=loadImgMap().then(()=>{imgRefreshing=null;renderWindow(1);});
+  return imgRefreshing;
+}
+/* null = not fetched yet. Only demo mode falls back to the bundled folder;
+   pointing a live <img> at a path that 404s used to trigger imgFail and a full
+   library relist for every pending photo on screen. */
+const thumbSrc=k=>imgMap['thumb/'+k]||(LOCAL?IMG_BASE+'/thumb/'+encodeURIComponent(k)+'.jpg':null);
+const fullSrc =k=>imgMap['full/'+k] ||IMG_BASE+'/full/'+encodeURIComponent(k)+'.jpg';
+window.imgFail=function(el){
+  if(el.dataset.retried){el.outerHTML='<span class="noimg">NO IMG</span>';return;}
+  el.dataset.retried='1';
+  const k=el.dataset.k;
+  /* a stale pre-authenticated URL — re-fetch that ONE key rather than
+     relisting the whole library, which is what a screen full of misses used
+     to trigger */
+  delete imgMap['thumb/'+k];imgWanted.delete(k);
+  if(LOCAL||!driveId)return;
+  fetchThumbChunk([k]).then(()=>{if(imgMap['thumb/'+k])el.src=imgMap['thumb/'+k];})
+    .catch(()=>{el.outerHTML='<span class="noimg">NO IMG</span>';});
+};
+
+async function load(quiet){
+  /* quiet = the hourly auto-refresh: keep scroll, cursor and ticked rows,
+     and do not jump to the bottom afterwards */
+  const keep=quiet?{
+    top:$('gw').scrollTop,
+    cur:{r:cur.r,c:cur.c},
+    picked:[...picked].map(r=>r._id).filter(Boolean)
+  }:null;
+  ROWS=[];dirty.clear();deleted=[];undoStack=[];syncBtns();
+  imgQueue=[];imgWanted.clear();bulkDone=false;
+  $('body').innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:var(--muted)">Loading…</td></tr>';
+  try{
+    if(LOCAL){
+      lookups={};lookupsOk=false;
+      const r=await fetch(SEED_URL);if(!r.ok)throw new Error('Cannot read '+SEED_URL);
+      ROWS=(await r.json()).map((o,i)=>Object.assign({_id:null,_n:i+1},o));
+    }else{
+      loadMsg('Finding the quote list…');
+      await resolveList();
+      loadMsg('Loading dropdown values…');
+      await loadLookups();
+      const sel=Object.values(FIELD).join(',');
+      /* images load in the background so rows paint as soon as they arrive */
+      const imgP=loadImgMap();
+      let url='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+listId+
+              '/items?$expand=fields($select='+sel+')&$top=999';
+      let n=0;
+      while(url){
+        loadMsg('Loading quotes… '+n);
+        const p=await graph(url);
+        p.value.forEach(it=>{const f=it.fields||{},o={_id:it.id,_n:++n};
+          for(const k in FIELD)o[k]=k==='date'?toISO(f[FIELD.date]):(f[FIELD[k]]||"");
+          ROWS.push(o);});
+        url=p['@odata.nextLink']||null;
+      }
+      imgP.then(()=>renderWindow(1));
+    }
+  }catch(e){
+    hideLoad();
+    $('body').innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:#b4452f">'+esc(e.message)+'</td></tr>';
+    return;
+  }
+  learnChoices();buildSide();applyView();hideLoad();
+  saveStatus();
+  if(keep){
+    const want=new Set(keep.picked);
+    picked=new Set(ROWS.filter(r=>want.has(r._id)));
+    applyView();
+    cur.r=Math.min(keep.cur.r,Math.max(0,VIEW.length-1));cur.c=keep.cur.c;
+    requestAnimationFrame(()=>{$('gw').scrollTop=keep.top;renderWindow(1);paintSel();});
+    toast('Refreshed · '+ROWS.length+' rows',2000);
+    return;
+  }
+  toast(ROWS.length+' rows loaded');
+  /* open at the newest rows, which is where new quotes land */
+  requestAnimationFrame(()=>requestAnimationFrame(goBottom));
+}
+/* ── hourly auto-refresh ───────────────────────────────────────────────
+   Skipped outright while anything is in flight — a pending save, an open
+   editor or an open dialog. It waits for the next tick rather than
+   forcing a flush, so it can never race a half-typed cell. */
+const AUTO_RELOAD_MS=60*60*1000;
+let autoTimer=null;
+function dialogOpen(){
+  return ['nq','sr','lk','lb','cx'].some(id=>{const e=$(id);return e&&e.classList.contains('open');})
+    ||$('fmenu').classList.contains('open')||$('mpick').classList.contains('open');
+}
+function startAutoReload(){
+  if(autoTimer)clearInterval(autoTimer);
+  autoTimer=setInterval(()=>{
+    if(LOCAL||document.hidden||isThrottled())return;
+    if(saveQ.size||saving||saveErr||editing||dialogOpen())return;
+    load(true);
+  },AUTO_RELOAD_MS);
+}
+function learnChoices(){
+  if(CHOICES.stage.indexOf(DONE_STAGE)<0)CHOICES.stage.push(DONE_STAGE);
+  for(const k in CHOICES){
+    const managed=lookupsOk&&(lookups[k]||[]).length;
+    if(managed){CHOICES[k]=activeLookup(k);continue;}
+    const s=new Set(CHOICES[k]);
+    ROWS.forEach(r=>{
+      if(!r[k])return;
+      if(isMulti(k))tokens(r[k]).forEach(t=>s.add(t));
+      else s.add(String(r[k]).trim());
+    });
+    CHOICES[k]=[...s].sort((a,b)=>a.localeCompare(b));
+  }
+  /* always offer Done, even when the lookup list hasn't got it yet */
+  if(CHOICES.stage.indexOf(DONE_STAGE)<0)CHOICES.stage.push(DONE_STAGE);
+}
+/* Stage Done ⇄ Archive, both directions. Marking Done archives; clearing Done
+   restores to Active. Only ever runs off a Stage edit, so a row archived by
+   hand stays archived — until somebody edits its Stage, at which point this
+   rule takes over and will pull it back to Active. */
+function applyDoneRule(rows){
+  const on=[],off=[];
+  rows.forEach(r=>{
+    const done=tokens(r.stage).indexOf(DONE_STAGE)>=0;
+    const arch=String(r.archived||'').trim().toLowerCase()==='yes';
+    if(done&&!arch)on.push({row:r,k:'archived',v:'Yes'});
+    else if(!done&&arch)off.push({row:r,k:'archived',v:''});
+  });
+  if(!on.length&&!off.length)return 0;
+  setCells(on.concat(off));
+  const say=[];
+  if(on.length)say.push(on.length+' marked Done → Archive');
+  if(off.length)say.push(off.length+' Done cleared → Active');
+  toast(say.join(' · ')+' · Ctrl+Z to undo',3600);
+  applyView();
+  return on.length+off.length;
+}
+
+/* ═══════════════════ HEADER ═══════════════════ */
+const CHK_W=34,NUM_W=44;
+/* Excel does not stop dead at the last value — there is always empty grid past
+   it. FILL_W of blank column on the right and FILL_ROWS of blank rows under the
+   data give the same feel and stop the last row/column colliding with the edge. */
+const FILL_W=260, FILL_ROWS=8;
+function buildColgroup(){
+  const cg=$('cg');
+  cg.innerHTML='<col style="width:'+CHK_W+'px">'+'<col style="width:'+NUM_W+'px">'+
+    COLS.map(c=>'<col style="width:'+c.w+'px">').join('')+
+    '<col style="width:'+FILL_W+'px">';
+  $('tbl').style.width=(CHK_W+NUM_W+COLS.reduce((a,c)=>a+c.w,0)+FILL_W)+'px';
+}
+const XL=i=>{let s='';i++;while(i>0){const m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26);}return s;};
+function buildLetters(){
+  const lr=$('lrow');lr.innerHTML='';
+  const corner=n=>{const th=document.createElement('th');th.className=n;th.innerHTML='&nbsp;';return th;};
+  lr.appendChild(corner('chk'));lr.appendChild(corner('num'));
+  COLS.forEach((c,i)=>{
+    const th=document.createElement('th');
+    if(c.sticky)th.classList.add('stky');
+    th.textContent=XL(i);
+    th.title='Select column '+XL(i);
+    th.onclick=()=>selectCol(i);
+    lr.appendChild(th);
+  });
+}
+function buildHead(){
+  buildColgroup();
+  buildLetters();
+  const hr=$('hrow');hr.innerHTML='';
+  const thc=document.createElement('th');
+  thc.className='chk';thc.title='Tag every visible row for export';
+  thc.innerHTML='<input type="checkbox" id="chkAll">';
+  thc.querySelector('input').onchange=e=>{
+    if(e.target.checked)VIEW.forEach(r=>picked.add(r));else picked.clear();
+    renderWindow(1);updateExpBtn();
+  };
+  hr.appendChild(thc);
+  const th0=document.createElement('th');
+  th0.className='num';th0.textContent='#';th0.title='Select whole row';
+  th0.onclick=selectAll;hr.appendChild(th0);
+  COLS.forEach((c,i)=>{
+    const th=document.createElement('th');
+    if(c.sticky)th.classList.add('stky');
+    th.innerHTML='<div class="hin"><span class="sb" id="sb'+i+'" title="Sort">▲▼</span>'+
+      '<span class="hlab'+(c.wraph?' wraph':'')+'" title="Click to select column">'+esc(c.h)+'</span>'+
+      '<span class="fbtn" id="fb'+i+'" title="Filter">▼</span></div><div class="rez"></div>';
+    th.querySelector('.hlab').onclick=e=>{e.stopPropagation();selectCol(i);};
+    th.querySelector('.sb').onclick=e=>{e.stopPropagation();doSort(c.k);};
+    th.querySelector('.fbtn').onclick=e=>{e.stopPropagation();openFilter(i,e.currentTarget);};
+    th.querySelector('.rez').onmousedown=e=>startResize(e,i,th);
+    hr.appendChild(th);
+  });
+  const thf=document.createElement('th');thf.className='fillc';thf.innerHTML='&nbsp;';
+  hr.appendChild(thf);
+  stickyOffsets();
+}
+/* offsets are MEASURED from the header, never assumed from config widths —
+   that mismatch was the sticky-column misalignment */
+let stickyL=[];
+function stickyOffsets(){
+  const ths=[...$('hrow').children];
+  if(!ths.length)return;
+  let left=0;
+  stickyL=[];
+  ths.forEach((th,idx)=>{
+    const sticky = idx<2 || (COLS[idx-2]&&COLS[idx-2].sticky);
+    stickyL[idx]= sticky?left:null;
+    if(sticky)th.style.left=left+'px';
+    left += idx===0?CHK_W : idx===1?NUM_W : COLS[idx-2].w;
+  });
+  const lr=$('lrow');
+  if(lr)[...lr.children].forEach((th,idx)=>{if(stickyL[idx]!=null)th.style.left=stickyL[idx]+'px';});
+  $('body').querySelectorAll('td.chk').forEach(td=>td.style.left=stickyL[0]+'px');
+  $('body').querySelectorAll('td.num').forEach(td=>td.style.left=stickyL[1]+'px');
+  COLS.forEach((c,i)=>{
+    if(!c.sticky||stickyL[i+2]==null)return;
+    $('body').querySelectorAll('td[data-c="'+i+'"]').forEach(td=>td.style.left=stickyL[i+2]+'px');
+  });
+}
+function startResize(e,i,th){
+  e.preventDefault();e.stopPropagation();
+  const x0=e.clientX,w0=COLS[i].w;
+  const mv=ev=>{
+    COLS[i].w=Math.max(52,w0+ev.clientX-x0);
+    buildColgroup();
+    stickyOffsets();
+  };
+  const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);
+    ls('qt_w',JSON.stringify(COLS.map(c=>c.w)));};
+  document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
+}
+function syncSortBtns(){
+  COLS.forEach((c,i)=>{const b=$('sb'+i);if(!b)return;
+    b.classList.toggle('on',c.k===sortK);
+    b.textContent=c.k===sortK?(sortDir>0?'▲':'▼'):'▲▼';});
+}
+function doSort(k){
+  if(sortK===k){if(sortDir<0){sortK=null;}else sortDir=-1;}else{sortK=k;sortDir=1;}
+  syncSortBtns();
+  applyView();
+}
+
+/* ═══════════════════ SIDEBAR ═══════════════════ */
+/* collapsed/expanded state per group, remembered across sessions */
+let sideOpen={};
+(function(){
+  let saved=null;try{saved=JSON.parse(ls('qt_sideopen')||'null');}catch(e){}
+  SIDE_GROUPS.forEach(g=>{
+    sideOpen[g.k]=saved&&(g.k in saved)?!!saved[g.k]:SIDE_OPEN_DEFAULT.indexOf(g.k)>=0;
+  });
+})();
+const saveSideOpen=()=>ls('qt_sideopen',JSON.stringify(sideOpen));
+function buildSide(){
+  SIDE_GROUPS.forEach(g=>{if(!side[g.k])side[g.k]=new Set();});
+  const b=$('sideBody');b.innerHTML='';
+  SIDE_GROUPS.forEach(g=>{
+    const d=document.createElement('div');d.className='sgrp'+(sideOpen[g.k]?'':' shut');
+    d.dataset.g=g.k;
+    d.innerHTML='<div class="lbl" data-t="'+g.k+'"><span class="cv">▾</span>'+esc(g.h)+
+      '<span class="on" id="sn_'+g.k+'"></span></div><div id="sg_'+g.k+'"></div>';
+    b.appendChild(d);
+    d.querySelector('.lbl').onclick=()=>{
+      sideOpen[g.k]=!sideOpen[g.k];
+      d.classList.toggle('shut',!sideOpen[g.k]);
+      saveSideOpen();
+    };
+  });
+  updateSide();
+}
+/* count rows passing every filter EXCEPT this group */
+function countsFor(gk){
+  const c={};
+  ROWS.forEach(r=>{
+    if(!passes(r,gk))return;
+    cellVals(r,gk).forEach(v=>{c[v]=(c[v]||0)+1;});
+  });
+  return c;
+}
+function updateSide(){
+  SIDE_GROUPS.forEach(g=>{
+    const host=$('sg_'+g.k);if(!host)return;
+    const counts=countsFor(g.k);
+    const seen=new Set();
+    ROWS.forEach(r=>cellVals(r,g.k).forEach(v=>seen.add(v)));
+    (CHOICES[g.k]||[]).forEach(v=>seen.add(v));
+    const vals=[...seen].sort((a,b)=>(counts[b]||0)-(counts[a]||0)||a.localeCompare(b));
+    host.innerHTML=vals.map(v=>{
+      const n=counts[v]||0;
+      return '<label class="sopt'+(n?'':' z')+'"><input type="checkbox" data-g="'+g.k+'" value="'+esc(v)+'"'+
+        (side[g.k].has(v)?' checked':'')+'><span class="nm" title="'+esc(v)+'">'+esc(v)+'</span>'+
+        '<span class="ct">'+n+'</span></label>';
+    }).join('');
+    host.querySelectorAll('input').forEach(cb=>cb.onchange=()=>{
+      const s=side[cb.dataset.g];
+      cb.checked?s.add(cb.value):s.delete(cb.value);
+      applyView();
+    });
+    const badge=$('sn_'+g.k);
+    if(badge){const n=side[g.k].size;badge.textContent=n?n:'';badge.style.display=n?'':'none';}
+  });
+}
+$('sideTog').onclick=()=>{
+  const s=$('side');s.classList.toggle('col');
+  $('sideTog').textContent=s.classList.contains('col')?'›':'‹';
+  ls('qt_side',s.classList.contains('col')?'1':'0');
+};
+$('sideClear').onclick=()=>{
+  SIDE_GROUPS.forEach(g=>side[g.k].clear());
+  filters={};query="";$('q').value='';
+  COLS.forEach((c,i)=>$('fb'+i).classList.remove('act'));
+  applyView();
+};
+
+/* ═══════════════════ FILTER MENU ═══════════════════ */
+function openFilter(i,btn){
+  fmenuCol=i;const k=COLS[i].k;
+  const counts={},seen=new Set();
+  for(let i=0;i<ROWS.length;i++){
+    const r=ROWS[i];
+    const vs=isMulti(k)?cellVals(r,k).map(v=>v==='(blank)'?'':v):[String(r[k]||'').trim()];
+    vs.forEach(v=>seen.add(v));
+    if(!passes(r,'#'+k))continue;
+    vs.forEach(v=>{counts[v]=(counts[v]||0)+1;});
+  }
+  const vals=[...seen].sort((a,b)=>a===''?1:b===''?-1:a.localeCompare(b,undefined,{numeric:true}));
+  const on=filters[k];
+  $('flist').innerHTML=vals.map(v=>'<label><input type="checkbox" value="'+esc(v)+'"'+
+    (!on||on.has(v)?' checked':'')+'><span class="nm">'+esc(v||'(blank)')+'</span>'+
+    '<span class="ct">'+(counts[v]||0)+'</span></label>').join('');
+  const m=$('fmenu'),r=btn.getBoundingClientRect();
+  m.style.left=Math.max(8,Math.min(r.left-190,innerWidth-252))+'px';
+  m.style.top=Math.min(r.bottom+6,innerHeight-410)+'px';
+  m.classList.add('open');$('fsearch').value='';$('fsearch').focus();
+}
+$('fsearch').oninput=e=>{const q=e.target.value.toLowerCase();
+  $('flist').querySelectorAll('label').forEach(l=>l.style.display=l.textContent.toLowerCase().includes(q)?'':'none');};
+$('fall').onclick=()=>$('flist').querySelectorAll('input').forEach(c=>{if(c.parentElement.style.display!=='none')c.checked=true;});
+$('fnone').onclick=()=>$('flist').querySelectorAll('input').forEach(c=>{if(c.parentElement.style.display!=='none')c.checked=false;});
+$('fapply').onclick=()=>{
+  const k=COLS[fmenuCol].k,boxes=[...$('flist').querySelectorAll('input')];
+  const on=boxes.filter(b=>b.checked).map(b=>b.value);
+  if(on.length===boxes.length)delete filters[k];else filters[k]=new Set(on);
+  $('fb'+fmenuCol).classList.toggle('act',!!filters[k]);
+  $('fmenu').classList.remove('open');applyView();
+};
+document.addEventListener('mousedown',e=>{
+  if(!$('fmenu').contains(e.target)&&!e.target.classList.contains('fbtn'))$('fmenu').classList.remove('open');});
+$('q').oninput=e=>{query=e.target.value.toLowerCase().trim();applyView();};
+
+/* ═══════════════════ VIEW ═══════════════════ */
+/* skip: null = apply all · 'action' = ignore that sidebar group · '#brand' = ignore that header filter */
+/* a cell may hold several values; membership is "any of them matches" */
+function cellVals(r,k){
+  if(isMulti(k)){const t=tokens(r[k]);return t.length?t:['(blank)'];}
+  return [String(r[k]||'').trim()||'(blank)'];
+}
+function passes(r,skip){
+  const arch=String(r.archived||'').trim().toLowerCase()==='yes';
+  if(viewMode==='active'&&arch)return false;
+  if(viewMode==='arch'&&!arch)return false;
+  for(const g of SIDE_GROUPS){
+    if(skip===g.k)continue;
+    const s=side[g.k];
+    if(s&&s.size&&!cellVals(r,g.k).some(v=>s.has(v)))return false;
+  }
+  for(const k in filters){
+    if(skip==='#'+k)continue;
+    const vs=isMulti(k)?cellVals(r,k).map(v=>v==='(blank)'?'':v)
+                       :[String(r[k]||'').trim()];
+    if(!vs.some(v=>filters[k].has(v)))return false;
+  }
+  if(query){
+    let hit=false;
+    for(const c of COLS)if(String(r[c.k]||'').toLowerCase().includes(query)){hit=true;break;}
+    if(!hit)return false;
+  }
+  return true;
+}
+function applyView(){
+  VIEW=ROWS.filter(r=>passes(r,null));
+  if(sortK){
+    const t=(COLS.find(c=>c.k===sortK)||{}).t;
+    VIEW.sort((a,b)=>{
+      const A=a[sortK]||'',B=b[sortK]||'';
+      if(t==='date')return((new Date(A||0))-(new Date(B||0)))*sortDir;
+      return String(A).localeCompare(String(B),undefined,{numeric:true})*sortDir;
+    });
+  }
+  cur.r=Math.min(cur.r,Math.max(0,VIEW.length-1));anchor=null;
+  /* Ticks survive searching and filtering. This used to prune picked down to
+     the CURRENT view, so ticking a row, searching for another and ticking that
+     one silently dropped the first — the whole point of the search box is to
+     collect rows from different searches into one export. Only rows that no
+     longer exist at all are dropped. */
+  if(picked.size){
+    const alive=new Set(ROWS);
+    picked.forEach(r=>{if(!alive.has(r))picked.delete(r);});
+  }
+  updateSide();
+  $('sShown').textContent=VIEW.length;$('sTotal').textContent=ROWS.length;
+  renderWindow(1);
+}
+
+/* ═══════════════════ VIRTUALIZED RENDER ═══════════════════ */
+function cellHtml(r,c,ci){
+  if(c.t==='img'){
+    return r.img
+      ? (thumbSrc(r.img)
+          ? '<img class="thumb" loading="lazy" data-k="'+esc(r.img)+'" src="'+thumbSrc(r.img)+'" alt="'+esc(r.style)+'" onerror="imgFail(this)">'
+          : '<span class="imgwait" data-k="'+esc(r.img)+'"></span>')
+      : '<span class="addimg">+ PHOTO</span>';
+  }
+  const v=c.t==='date'?fmtDate(r.date):(r[c.k]||'');
+  if(c.multi){
+    const ts=tokens(v);
+    if(!ts.length)return '';
+    return ts.map(t=>{
+      const p=(PILL[c.pill]||{})[t];
+      return p?'<span class="pill" style="background:'+p[0]+';color:'+p[1]+'">'+esc(t)+'</span>'
+              :'<span class="pill" style="background:rgba(95,108,125,.13);color:#4a5666">'+esc(t)+'</span>';
+    }).join('');
+  }
+  if(c.pill&&v){
+    const p=(PILL[c.pill]||{})[v];
+    if(p)return '<span class="pill" style="background:'+p[0]+';color:'+p[1]+'">'+esc(v)+'</span>';
+  }
+  return esc(v);
+}
+function buildRow(r,vi){
+  const tr=document.createElement('tr');
+  tr.dataset.v=vi;
+  if(picked.has(r))tr.classList.add('picked');
+  const tdc=document.createElement('td');
+  tdc.className='chk';
+  tdc.innerHTML='<input type="checkbox"'+(picked.has(r)?' checked':'')+'>';
+  tr.appendChild(tdc);
+  const tdn=document.createElement('td');
+  tdn.className='num';tdn.textContent=vi+1;tdn.title='Select whole row';
+  tr.appendChild(tdn);
+  tdc.style.left=(stickyL[0]||0)+'px';
+  tdn.style.left=(stickyL[1]!=null?stickyL[1]:34)+'px';
+  COLS.forEach((c,ci)=>{
+    const td=document.createElement('td');
+    td.dataset.r=vi;td.dataset.c=ci;
+    if(c.sticky){td.classList.add('stk');td.style.left=(stickyL[ci+2]||0)+'px';}
+    if(c.t==='sel')td.classList.add('pickable');
+    if(c.multi)td.classList.add('multi');
+    if(dirty.has(r._n+'|'+c.k))td.classList.add('dirty');
+    const h=cellHtml(r,c,ci);
+    td.innerHTML=(c.t==='img'?h:'<div class="cv"'+(c.k==='note'&&r.note?' title="'+esc(r.note)+'"':'')+'>'+h+'</div>')+(c.t==='sel'?'<span class="caret">\u25BE</span>':'');
+    tr.appendChild(td);
+  });
+  const tdf=document.createElement('td');tdf.className='fillc';tr.appendChild(tdf);
+  return tr;
+}
+/* blank grid under the data — not selectable, purely visual */
+function fillerRow(){
+  const tr=document.createElement('tr');tr.className='fillr';
+  tr.innerHTML='<td class="chk"></td><td class="num"></td>'+
+    COLS.map((c,ci)=>'<td'+(c.sticky?' class="stk" style="left:'+(stickyL[ci+2]||0)+'px"':'')+'></td>').join('')+
+    '<td class="fillc"></td>';
+  return tr;
+}
+function rowH(){return rowHEff||ROWH;}
+function renderWindow(force){
+  const gw=$('gw'),n=VIEW.length;
+  const RH=rowH();
+  const vis=Math.ceil(gw.clientHeight/RH)+8;
+  let a=Math.max(0,Math.floor(gw.scrollTop/RH)-4);
+  let b=Math.min(n,a+vis);
+  if(!force&&a===winA&&b===winB)return;
+  winA=a;winB=b;
+  const body=$('body'),f=document.createDocumentFragment();
+  if(!n){
+    body.innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:var(--muted)">No rows match the current filters.</td></tr>';
+    return;
+  }
+  const sp=document.createElement('tr');sp.className='spacer';
+  sp.innerHTML='<td colspan="'+(COLS.length+3)+'" style="height:'+(a*RH)+'px"></td>';
+  f.appendChild(sp);
+  for(let i=a;i<b;i++)f.appendChild(buildRow(VIEW[i],i));
+  const sp2=document.createElement('tr');sp2.className='spacer';
+  sp2.innerHTML='<td colspan="'+(COLS.length+3)+'" style="height:'+((n-b)*RH)+'px"></td>';
+  f.appendChild(sp2);
+  /* blank grid past the last row, only when the last row is actually rendered */
+  if(b>=n)for(let i=0;i<FILL_ROWS;i++)f.appendChild(fillerRow());
+  body.innerHTML='';body.appendChild(f);
+  stickyOffsets();
+  paintSel();
+  queueVisibleThumbs();
+  /* if the measured height differs from what the spacers assumed, redo once */
+  if(!remeasuring){
+    const tr=body.querySelector('tr:not(.spacer)');
+    if(tr){
+      const h=tr.getBoundingClientRect().height;
+      if(h>4&&Math.abs(h-RH)>0.5){
+        rowHEff=h;remeasuring=true;
+        renderWindow(1);
+        remeasuring=false;
+      }
+    }
+  }
+}
+$('gw').addEventListener('scroll',()=>{
+  /* re-rendering under an open editor destroys its DOM node and leaves a white
+     hole — close it first, then repaint */
+  if($('mpick').classList.contains('open'))commitMulti();
+  if(editing)commitEdit();
+  if($('fmenu').classList.contains('open'))$('fmenu').classList.remove('open');
+  renderWindow(0);
+},{passive:true});
+addEventListener('resize',()=>renderWindow(1));
+
+/* patch a single cell without rebuilding the table */
+function patchCell(vi,ci){
+  const td=$('body').querySelector('td[data-r="'+vi+'"][data-c="'+ci+'"]');
+  if(!td)return;
+  const r=VIEW[vi],c=COLS[ci];
+  const h=cellHtml(r,c,ci);
+  td.innerHTML=(c.t==='img'?h:'<div class="cv"'+(c.k==='note'&&r.note?' title="'+esc(r.note)+'"':'')+'>'+h+'</div>')+(c.t==='sel'?'<span class="caret">\u25BE</span>':'');
+  td.classList.toggle('dirty',dirty.has(r._n+'|'+c.k));
+}
+
+/* ═══════════════════ SELECTION ═══════════════════ */
+const cellEl=(r,c)=>$('body').querySelector('td[data-r="'+r+'"][data-c="'+c+'"]');
+function paintSel(){
+  $('body').querySelectorAll('td.sel,td.inrange').forEach(td=>td.classList.remove('sel','inrange'));
+  const s=selRange();
+  for(let r=Math.max(s.r1,winA);r<=Math.min(s.r2,winB-1);r++)
+    for(let c=s.c1;c<=s.c2;c++){const e=cellEl(r,c);if(e)e.classList.add('inrange');}
+  const e=cellEl(cur.r,cur.c);if(e)e.classList.add('sel');
+  const fullCol=VIEW.length>0&&s.r1===0&&s.r2===VIEW.length-1;
+  COLS.forEach((c,i)=>{const l=$('lrow').children[i+2];
+    if(l)l.classList.toggle('lsel',fullCol&&i>=s.c1&&i<=s.c2);});
+  COLS.forEach((c,i)=>$('hrow').children[i+2].classList.toggle('hsel',fullCol&&s.c1<=i&&i<=s.c2));
+  const row=VIEW[cur.r];
+  const nsel=(s.r2-s.r1+1)*(s.c2-s.c1+1);
+  $('sCell').textContent=row?(COLS[cur.c].h+' · row '+(cur.r+1)+(row.style?' · '+row.style:'')+(nsel>1?'  ('+nsel+' cells)':'')):'—';
+  updateExpBtn();
+}
+/* exports are driven strictly by the row checkboxes */
+/* Every ticked row, not just the ones matching the current search — ticks are
+   collected across searches, so the export must be too. ROWS order keeps it
+   stable regardless of what the grid is sorted by. */
+function exportRows(){return ROWS.filter(r=>picked.has(r));}
+function syncChkAll(){
+  const a=$('chkAll');if(!a)return;
+  const inView=VIEW.reduce((n,r)=>n+(picked.has(r)?1:0),0);
+  a.checked=VIEW.length>0&&inView>=VIEW.length;
+  a.indeterminate=inView>0&&inView<VIEW.length;
+}
+function updateExpBtn(){
+  const n=exportRows().length;
+  $('expDev').textContent='Dev Tracker'+(n?' ('+n+')':'');
+  $('expSR').textContent='Sample Request'+(n?' ('+n+')':'');
+  syncChkAll();
+}
+function selRange(){
+  const a=anchor||cur;
+  return {r1:Math.max(0,Math.min(a.r,cur.r)),r2:Math.min(VIEW.length-1,Math.max(a.r,cur.r)),
+          c1:Math.max(0,Math.min(a.c,cur.c)),c2:Math.min(COLS.length-1,Math.max(a.c,cur.c))};
+}
+function moveTo(r,c,keep){
+  cur.r=Math.max(0,Math.min(VIEW.length-1,r));cur.c=Math.max(0,Math.min(COLS.length-1,c));
+  if(!keep)anchor={r:cur.r,c:cur.c};
+  if(cur.r<winA+2||cur.r>winB-3){
+    $('gw').scrollTop=Math.max(0,(cur.r-3)*rowH());
+    renderWindow(1);
+  }else paintSel();
+  const e=cellEl(cur.r,cur.c);if(e)e.scrollIntoView({block:'nearest',inline:'nearest'});
+}
+function selectRow(vi,extend){
+  if(!extend){anchor={r:vi,c:0};cur={r:vi,c:COLS.length-1};}
+  else{anchor={r:anchor?anchor.r:vi,c:0};cur={r:vi,c:COLS.length-1};}
+  paintSel();
+}
+function selectCol(ci){anchor={r:0,c:ci};cur={r:VIEW.length-1,c:ci};paintSel();}
+function selectAll(){anchor={r:0,c:0};cur={r:VIEW.length-1,c:COLS.length-1};paintSel();}
+
+$('body').addEventListener('mousedown',e=>{
+  const td=e.target.closest('td');if(!td)return;
+  /* a click INSIDE the open editor is caret placement, not a move to another
+     cell — committing here is what forced the cursor back to the end and made
+     the middle of the text unclickable */
+  if(editing&&editEl&&(e.target===editEl||editEl.contains(e.target)))return;
+  if(editing)commitEdit();
+  /* the blank grid past the last row, and the filler column, are decoration —
+     they carry no dataset.r/c and must not move the cursor */
+  if(td.classList.contains('fillc')||td.parentElement.classList.contains('fillr'))return;
+  if(td.classList.contains('chk')){
+    /* let the input's own change event do the work; clicking the cell
+       around it just forwards to the input */
+    const inp=td.querySelector('input');if(!inp)return;
+    if(e.target.tagName!=='INPUT'){e.preventDefault();inp.click();}
+    return;
+  }
+  if(td.classList.contains('num')){
+    const vi=+td.parentElement.dataset.v;
+    if(e.ctrlKey||e.metaKey){
+      const row=VIEW[vi];
+      picked.has(row)?picked.delete(row):picked.add(row);
+      td.parentElement.classList.toggle('picked',picked.has(row));
+      updateExpBtn();return;
+    }
+    selectRow(vi,e.shiftKey);return;
+  }
+  if(e.target.classList.contains('thumb')||e.target.classList.contains('addimg'))return;
+  const r=+td.dataset.r,c=+td.dataset.c;
+  if(e.shiftKey){
+    if(!anchor)anchor={r:cur.r,c:cur.c};
+    cur={r:r,c:c};
+    paintSel();
+    return;
+  }
+  anchor={r:r,c:c};
+  cur={r:r,c:c};
+  paintSel();
+  const e2=cellEl(r,c);
+  if(e2)e2.scrollIntoView({block:'nearest',inline:'nearest'});
+  if(e.target.classList.contains('caret')){setTimeout(beginEdit,0);return;}
+  startDrag();
+});
+$('body').addEventListener('change',e=>{
+  const cb=e.target;
+  if(cb.type!=='checkbox')return;
+  const td=cb.closest('td');
+  if(!td||!td.classList.contains('chk'))return;
+  const row=VIEW[+td.parentElement.dataset.v];
+  if(!row)return;
+  cb.checked?picked.add(row):picked.delete(row);
+  td.parentElement.classList.toggle('picked',cb.checked);
+  syncChkAll();updateExpBtn();
+});
+let dragging=false;
+function startDrag(){
+  if(dragging)return;
+  dragging=true;
+  const mv=ev=>{
+    const el=document.elementFromPoint(ev.clientX,ev.clientY);
+    const cell=el&&el.closest?el.closest('td[data-r]'):null;
+    if(!cell)return;
+    const r=+cell.dataset.r,c=+cell.dataset.c;
+    if(r===cur.r&&c===cur.c)return;
+    cur={r:r,c:c};
+    paintSel();
+  };
+  const up=()=>{
+    dragging=false;
+    document.removeEventListener('mousemove',mv);
+    document.removeEventListener('mouseup',up);
+  };
+  document.addEventListener('mousemove',mv);
+  document.addEventListener('mouseup',up);
+}
+$('body').addEventListener('dblclick',e=>{
+  const td=e.target.closest('td');
+  if(!td||td.classList.contains('num'))return;
+  if(e.target.classList.contains('thumb'))return;
+  caretAt={x:e.clientX,t:Date.now()};
+  moveTo(+td.dataset.r,+td.dataset.c);beginEdit();
+});
+$('body').addEventListener('click',e=>{
+  if(e.target.classList.contains('thumb')&&!e.altKey){openLb(+e.target.closest('td').dataset.r);}
+});
+
+document.addEventListener('keydown',e=>{
+  if($('gate').style.display!=='none')return;
+  if($('nq').classList.contains('open')){if(e.key==='Escape')closeNq();return;}
+  if($('sr').classList.contains('open')){if(e.key==='Escape')closeSr();return;}
+  if($('lk').classList.contains('open')){if(e.key==='Escape')closeLk();return;}
+  if($('cx').classList.contains('open')){if(e.key==='Escape')closeCx();return;}
+  if($('lb').classList.contains('open')){
+    if(e.key==='Escape')closeLb();
+    if(e.key==='ArrowLeft')lbStep(-1);
+    if(e.key==='ArrowRight')lbStep(1);
+    return;
+  }
+  /* any genuine input owns its own keys — search box, dialogs, cell editors */
+  const ae=document.activeElement;
+  if(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)&&!ae.classList.contains('cellin'))return;
+  const mod=e.ctrlKey||e.metaKey;
+  if(editing){
+    if(e.key==='Escape'){cancelEdit();e.preventDefault();}
+    else if(e.key==='Enter'&&!e.shiftKey){commitEdit();moveTo(cur.r+1,cur.c);e.preventDefault();}
+    else if(e.key==='Tab'){commitEdit();moveTo(cur.r,cur.c+(e.shiftKey?-1:1));e.preventDefault();}
+    return;
+  }
+  if(mod&&e.key.toLowerCase()==='a'){selectAll();e.preventDefault();return;}
+  if(mod&&e.key.toLowerCase()==='z'&&e.shiftKey){doRedo();e.preventDefault();return;}
+  if(mod&&e.key.toLowerCase()==='z'){doUndo();e.preventDefault();return;}
+  if(mod&&e.key.toLowerCase()==='y'){doRedo();e.preventDefault();return;}
+  if(mod&&e.key.toLowerCase()==='c'){copySel();e.preventDefault();return;}
+  if(mod&&e.key.toLowerCase()==='d'){fillDown();e.preventDefault();return;}
+  if(e.shiftKey&&e.key.indexOf('Arrow')===0&&!anchor)anchor={r:cur.r,c:cur.c};
+  switch(e.key){
+    case 'ArrowUp':moveTo(cur.r-1,cur.c,e.shiftKey);break;
+    case 'ArrowDown':moveTo(cur.r+1,cur.c,e.shiftKey);break;
+    case 'ArrowLeft':moveTo(cur.r,cur.c-1,e.shiftKey);break;
+    case 'ArrowRight':moveTo(cur.r,cur.c+1,e.shiftKey);break;
+    case 'Tab':moveTo(cur.r,cur.c+(e.shiftKey?-1:1));break;
+    case 'Home':moveTo(cur.r,0);break;
+    case 'End':moveTo(cur.r,COLS.length-1);break;
+    case 'PageDown':moveTo(cur.r+18,cur.c);break;
+    case 'PageUp':moveTo(cur.r-18,cur.c);break;
+    case 'Enter':moveTo(cur.r+(e.shiftKey?-1:1),cur.c);break;
+    case 'F2':beginEdit();break;
+    case 'Delete':case 'Backspace':clearSel();break;
+    default:
+      if(e.key.length===1&&!mod&&!e.altKey)beginEdit(e.key);else return;
+  }
+  e.preventDefault();
+});
+
+/* ═══════════════════ EDITING ═══════════════════ */
+let mpRow=null,mpKey=null;
+function openMulti(row,k,td){
+  mpRow=row;mpKey=k;
+  const col=COLS.find(c=>c.k===k);
+  const on=new Set(tokens(row[k]));
+  const opts=(CHOICES[k]||[]).slice();
+  tokens(row[k]).forEach(t=>{if(opts.indexOf(t)<0)opts.push(t);});
+  $('mpTitle').textContent=col.h+' — tick any number';
+  $('mpList').innerHTML=opts.map(o=>'<label><input type="checkbox" value="'+esc(o)+'"'+
+    (on.has(o)?' checked':'')+'><span>'+esc(o)+'</span></label>').join('');
+  const m=$('mpick'),r=td.getBoundingClientRect();
+  m.style.left=Math.max(8,Math.min(r.left,innerWidth-246))+'px';
+  m.style.top=Math.min(r.bottom+4,innerHeight-348)+'px';
+  m.classList.add('open');
+}
+function commitMulti(){
+  if(!mpRow)return;
+  const picked=[...$('mpList').querySelectorAll('input')].filter(b=>b.checked).map(b=>b.value);
+  const nv=joinTokens(picked);
+  const changed=nv!==(mpRow[mpKey]||'');
+  const row=mpRow,key=mpKey;
+  if(changed)setCell(row,key,nv,true);
+  $('mpick').classList.remove('open');
+  mpRow=null;mpKey=null;
+  renderWindow(1);updateSide();
+  if(changed&&key==='stage')applyDoneRule([row]);
+}
+$('mpAdd').onclick=()=>{
+  const col=COLS.find(c=>c.k===mpKey);
+  const v=prompt('New '+(col?col.h:'value')+':','');
+  if(!v||!v.trim())return;
+  const nv=v.trim();
+  addLookup(mpKey,nv).catch(err=>toast('Saved on the row, but not to '+LOOKUP_LIST+': '+err.message,4000));
+  const lab=document.createElement('label');
+  lab.innerHTML='<input type="checkbox" value="'+esc(nv)+'" checked><span>'+esc(nv)+'</span>';
+  $('mpList').appendChild(lab);
+  lab.scrollIntoView({block:'nearest'});
+};
+$('mpDone').onclick=commitMulti;
+$('mpClear').onclick=()=>{$('mpList').querySelectorAll('input').forEach(b=>b.checked=false);commitMulti();};
+document.addEventListener('mousedown',e=>{
+  if($('mpick').classList.contains('open')&&!$('mpick').contains(e.target))commitMulti();
+},true);
+
+/* where the pointer was when an edit was opened, so the caret can land there */
+let caretAt=null;
+/* measure the cell's own font so the offset is right at any row height */
+function caretOffset(inp,clientX){
+  try{
+    const txt=inp.value;if(!txt)return 0;
+    const r=inp.getBoundingClientRect();
+    const cs=getComputedStyle(inp);
+    const cvs=caretOffset._c||(caretOffset._c=document.createElement('canvas'));
+    const ctx=cvs.getContext('2d');
+    ctx.font=cs.fontStyle+' '+cs.fontWeight+' '+cs.fontSize+' '+cs.fontFamily;
+    const padL=parseFloat(cs.paddingLeft)||0;
+    let x=clientX-r.left-padL;
+    if(x<=0)return 0;
+    let prev=0;
+    for(let i=1;i<=txt.length;i++){
+      const w=ctx.measureText(txt.slice(0,i)).width;
+      if(w>=x)return (x-prev)<(w-x)?i-1:i;
+      prev=w;
+    }
+    return txt.length;
+  }catch(e){return null;}
+}
+function beginEdit(seed){
+  const col=COLS[cur.c],row=VIEW[cur.r];
+  if(!row||col.t==='img')return;
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const td=cellEl(cur.r,cur.c);if(!td)return;
+  if(col.multi){openMulti(row,col.k,td);return;}
+  editing=true;editPrev=row[col.k]||'';
+  if(col.t==='sel'){
+    const s=document.createElement('select');s.className='cellin';
+    const opts=[""].concat(CHOICES[col.k]||[]);
+    if(editPrev&&opts.indexOf(editPrev)<0)opts.push(editPrev);
+    s.innerHTML=opts.map(o=>'<option value="'+esc(o)+'"'+(o===editPrev?' selected':'')+'>'+esc(o||'—')+'</option>').join('')
+      +'<option value="__ADD__">＋ Add new…</option>';
+    td.innerHTML='';td.appendChild(s);s.focus();
+    if(s.showPicker)try{s.showPicker();}catch(x){}
+    s.onchange=()=>{
+      if(s.value==='__ADD__'){
+        const v=prompt('New '+col.h+':','');
+        if(v&&v.trim()){
+          const nv=v.trim();
+          s.add(new Option(nv,nv),s.options.length-1);
+          s.value=nv;
+          addLookup(col.k,nv).catch(err=>toast('Saved on the row, but not to '+LOOKUP_LIST+': '+err.message,4000));
+        }else{s.value=editPrev;}
+      }
+      commitEdit();
+    };
+    s.onblur=()=>{if(editing)commitEdit();};
+    editEl=s;return;
+  }
+  const inp=document.createElement('input');inp.className='cellin';
+  if(col.t==='date'){inp.type='date';inp.value=toISO(editPrev);}
+  else inp.value=seed!==undefined?seed:editPrev;
+  td.innerHTML='';td.appendChild(inp);
+  inp.focus();
+  /* Excel behaviour: opening an edit by clicking puts the caret under the
+     pointer; opening it any other way puts it at the end. caretAt is stamped
+     by the double-click handler. */
+  let caret=seed!==undefined?1:inp.value.length;
+  if(seed===undefined&&caretAt&&col.t!=='date'&&Date.now()-caretAt.t<900){
+    const off=caretOffset(inp,caretAt.x);
+    if(off!=null)caret=off;
+  }
+  caretAt=null;
+  try{inp.setSelectionRange(caret,caret);}catch(x){}
+  inp.onblur=()=>{if(editing)commitEdit();};
+  editEl=inp;
+}
+function commitEdit(){
+  if(!editing)return;
+  const col=COLS[cur.c],row=VIEW[cur.r],nv=editEl?editEl.value:editPrev;
+  const vi=cur.r,ci=cur.c;
+  editing=false;editEl=null;
+  const changed=String(nv)!==String(editPrev||'');
+  if(changed)setCell(row,col.k,nv,true);
+  patchCell(vi,ci);paintSel();
+  if(SIDE_GROUPS.some(g=>g.k===col.k))updateSide();
+  if(changed&&col.k==='stage')applyDoneRule([row]);
+}
+function cancelEdit(){const vi=cur.r,ci=cur.c;editing=false;editEl=null;patchCell(vi,ci);paintSel();}
+function setCell(row,k,v,push){
+  if(push){undoStack.push([{row:row,k:k,v:row[k]}]);redoStack=[];}
+  row[k]=v;dirty.add(row._n+'|'+k);queueSave(row);
+}
+function setCells(changes){
+  if(!changes.length)return;
+  undoStack.push(changes.map(c=>({row:c.row,k:c.k,v:c.row[c.k]})));redoStack=[];
+  const rows=new Set();
+  changes.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
+  rows.forEach(r=>saveQ.add(r));queueSave(null);
+  renderWindow(1);updateSide();
+  if(changes.some(c=>c.k==='stage'))setTimeout(()=>applyDoneRule([...rows]),0);
+}
+function clearSel(){
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const s=selRange(),ch=[];
+  for(let r=s.r1;r<=s.r2;r++)for(let c=s.c1;c<=s.c2;c++){
+    if(COLS[c].t==='img')continue;
+    ch.push({row:VIEW[r],k:COLS[c].k,v:""});
+  }
+  setCells(ch);
+}
+function fillDown(){
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const s=selRange();
+  const ch=[];
+  if(s.r2===s.r1){                       /* single row → copy the row above */
+    if(s.r1===0){toast('Nothing above to fill from');return;}
+    for(let c=s.c1;c<=s.c2;c++){
+      if(COLS[c].t==='img')continue;
+      ch.push({row:VIEW[s.r1],k:COLS[c].k,v:VIEW[s.r1-1][COLS[c].k]});
+    }
+  }else{
+    for(let c=s.c1;c<=s.c2;c++){
+      if(COLS[c].t==='img')continue;
+      const src=VIEW[s.r1][COLS[c].k];
+      for(let r=s.r1+1;r<=s.r2;r++)ch.push({row:VIEW[r],k:COLS[c].k,v:src});
+    }
+  }
+  if(!ch.length)return;
+  setCells(ch);toast('Filled '+ch.length+' cell'+(ch.length>1?'s':''));
+}
+function copySel(){
+  const s=selRange(),lines=[];
+  for(let r=s.r1;r<=s.r2;r++){
+    const cells=[];
+    for(let c=s.c1;c<=s.c2;c++){
+      const col=COLS[c],row=VIEW[r];
+      cells.push(col.t==='img'?(row.img||'')
+        :String(col.t==='date'?fmtDate(row.date):(row[col.k]||'')).replace(/[\t\n]/g,' '));
+    }
+    lines.push(cells.join('\t'));
+  }
+  const txt=lines.join('\n');
+  const label='Copied '+(s.r2-s.r1+1)+'×'+(s.c2-s.c1+1);
+  const legacy=()=>{
+    try{
+      const ta=document.createElement('textarea');
+      ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.focus();ta.select();
+      const ok=document.execCommand('copy');ta.remove();
+      toast(ok?label:'Copy was blocked by the browser',ok?2200:3200);
+    }catch(err){toast('Copy was blocked by the browser',3200);}
+  };
+  if(navigator.clipboard&&navigator.clipboard.writeText)
+    navigator.clipboard.writeText(txt).then(()=>toast(label)).catch(legacy);
+  else legacy();
+}
+document.addEventListener('paste',e=>{
+  if($('gate').style.display!=='none'||editing||$('nq').classList.contains('open')
+     ||$('sr').classList.contains('open')||$('lk').classList.contains('open'))return;
+  /* let the search box, dialog fields and cell editors paste normally */
+  const ae=document.activeElement;
+  if(ae&&/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName))return;
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const txt=(e.clipboardData||window.clipboardData).getData('text');if(!txt)return;
+  e.preventDefault();
+  const grid=txt.replace(/\r/g,'').replace(/\n$/,'').split('\n').map(l=>l.split('\t'));
+  const gh=grid.length,gw=Math.max(...grid.map(l=>l.length));
+  const sel=selRange();
+  const selH=sel.r2-sel.r1+1,selW=sel.c2-sel.c1+1;
+  /* Excel behaviour: a copied block smaller than the selection tiles to fill it,
+     so one cell copied over a 40-row selection lands in all 40. Anything else
+     pastes from the cursor at its own size. */
+  const tile=(selH>1||selW>1)&&selH>=gh&&selW>=gw&&(selH>gh||selW>gw);
+  const r0=tile?sel.r1:cur.r, c0=tile?sel.c1:cur.c;
+  const rows=tile?selH:gh, cols=tile?selW:gw;
+  const ch=[];
+  for(let dr=0;dr<rows;dr++)for(let dc=0;dc<cols;dc++){
+    const r=r0+dr,c=c0+dc;
+    if(r>=VIEW.length||c>=COLS.length)continue;
+    const col=COLS[c];if(col.t==='img')continue;
+    const line=grid[dr%gh]||[];
+    const val=line[dc%Math.max(line.length,1)];
+    if(val===undefined)continue;
+    ch.push({row:VIEW[r],k:col.k,v:col.t==='date'?toISO(val):val});
+  }
+  setCells(ch);
+  toast(tile?'Pasted into '+selH+'×'+selW+' cells'
+            :'Pasted '+gh+' row'+(gh>1?'s':''));
+});
+function doUndo(){
+  const step=undoStack.pop();if(!step)return;
+  const rows=new Set();
+  redoStack.push(step.map(c=>({row:c.row,k:c.k,v:c.row[c.k]})));
+  step.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
+  rows.forEach(r=>saveQ.add(r));queueSave(null);
+  renderWindow(1);updateSide();toast('Undone');
+}
+function doRedo(){
+  const step=redoStack.pop();if(!step)return;
+  const rows=new Set();
+  undoStack.push(step.map(c=>({row:c.row,k:c.k,v:c.row[c.k]})));
+  step.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
+  rows.forEach(r=>saveQ.add(r));queueSave(null);
+  renderWindow(1);updateSide();toast('Redone');
+}
+function syncBtns(){
+  $('undo').disabled=undoStack.length===0;
+  $('redo').disabled=redoStack.length===0;
+  $('sDirty').innerHTML='';
+  saveStatus();
+}
+
+/* ═══════════════════ ROWS ═══════════════════ */
+$('addRow').onclick=()=>{
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const o={_id:null,_n:ROWS.reduce((m,r)=>Math.max(m,r._n),0)+1};
+  COLS.forEach(c=>o[c.k]='');
+  o.date=new Date().toISOString().slice(0,10);
+  ROWS.push(o);
+  applyView();
+  moveTo(VIEW.length-1,2);
+  $('gw').scrollTop=$('gw').scrollHeight;
+  toast('Row added at the bottom — saves once you enter a value');
+};
+$('delRow').onclick=()=>{
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  /* ticked rows win over the cursor selection — ticking five and hitting
+     Delete used to remove only the row the cursor sat on */
+  const s=selRange();
+  const gone=picked.size?VIEW.filter(r=>picked.has(r)):VIEW.slice(s.r1,s.r2+1);
+  if(!gone.length||!confirm('Delete '+gone.length+' row'+(gone.length>1?'s':'')+'?'))return;
+  gone.forEach(r=>picked.delete(r));
+  gone.forEach(r=>{if(r._id)deleted.push(r._id);saveQ.delete(r);ROWS=ROWS.filter(x=>x!==r);});
+  queueSave(null);applyView();toast('Deleted '+gone.length+' row(s)');
+};
+$('reload').onclick=async()=>{
+  if(saveQ.size||saving){toast('Finishing save first…');await flushSave();}
+  if(saveErr&&!confirm('There is an unsaved change that failed. Reload anyway?'))return;
+  load();
+};
+$('undo').onclick=doUndo;$('redo').onclick=doRedo;
+
+/* ═══════════════════ LOOKUP WRITES ═══════════════════ */
+const lookupBase=()=>'https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+lookupListId+'/items';
+const typeNameFor=k=>Object.keys(LOOKUP_TYPES).find(t=>LOOKUP_TYPES[t]===k);
+
+async function addLookup(k,value){
+  const v=String(value||'').trim();
+  if(!v)return null;
+  if(!lookupsOk){                                  /* unmanaged: memory only */
+    if((CHOICES[k]||[]).indexOf(v)<0)CHOICES[k].push(v);
+    return {title:v};
+  }
+  await resolveLookups();
+  const fields={Title:v};fields[LKF.type]=typeNameFor(k);
+  const res=await graph(lookupBase(),{method:'POST',body:JSON.stringify({fields:fields})});
+  const item={id:res.id,title:v,type:typeNameFor(k),sort:null,inactive:false};
+  (lookups[k]=lookups[k]||[]).push(item);
+  CHOICES[k]=activeLookup(k);
+  return item;
+}
+/* ═══════════════════ CAD AUTO-NUMBERING ═══════════════════
+   The counter is one row in Quote_Lookups: Title=CAD, LookupType=Sequence,
+   SortOrder = last number issued. loadLookups() ignores the Sequence type, so
+   the row never appears in a dropdown, the Lists panel or the filter pane.
+
+   Two people stamping at the same instant would otherwise take the same
+   number, so the write is guarded with the item's ETag: a 412 means someone
+   else got there first, and we re-read and take the next one. Numbers are
+   never handed back — deleting a stamped row burns that number for good. */
+let cadItem=null;
+const padCad=n=>CAD_PREFIX+String(n).padStart(CAD_PAD,'0');
+async function findCadRow(){
+  await resolveLookups();
+  const url=lookupBase()+'?$expand=fields($select=Title,'+LKF.type+
+            (LKF.sort?','+LKF.sort:'')+')&$top=999';
+  const p=await graph(url);
+  const hit=(p.value||[]).find(it=>{
+    const f=it.fields||{};
+    return String(f[LKF.type]||'').trim().toLowerCase()===CAD_SEQ_TYPE.toLowerCase()
+        && String(f.Title||'').trim().toLowerCase()===CAD_SEQ_TITLE.toLowerCase();
+  });
+  if(!hit)throw new Error('No CAD counter found in '+LOOKUP_LIST+
+    '. Add one row: Title "'+CAD_SEQ_TITLE+'", LookupType "'+CAD_SEQ_TYPE+'", SortOrder 0.');
+  if(!LKF.sort)throw new Error('No SortOrder-style number column on '+LOOKUP_LIST+
+    ' to hold the CAD counter.');
+  cadItem={id:hit.id};
+  return hit;
+}
+/* reserve n consecutive numbers in one write; returns the array of strings */
+async function reserveCad(n){
+  if(LOCAL)throw new Error('Demo mode is read-only');
+  for(let attempt=0;attempt<6;attempt++){
+    const hit=await findCadRow();
+    const cur=Number((hit.fields||{})[LKF.sort]||0)||0;
+    const body={};body[LKF.sort]=cur+n;
+    const etag=hit['@odata.etag']||(hit.fields&&hit.fields['@odata.etag']);
+    try{
+      await graph(lookupBase()+'/'+cadItem.id+'/fields',
+        {method:'PATCH',headers:etag?{'if-match':etag}:undefined,body:JSON.stringify(body)});
+    }catch(e){
+      /* 412 = someone else incremented between our read and write */
+      if(/412|precondition/i.test(e.message)&&attempt<5){await new Promise(r=>setTimeout(r,120+attempt*180));continue;}
+      throw e;
+    }
+    const out=[];for(let i=1;i<=n;i++)out.push(padCad(cur+i));
+    return out;
+  }
+  throw new Error('CAD counter is busy — try again in a moment');
+}
+/* count rows still holding a value — multi columns match on any one token */
+function rowsUsing(k,val){
+  return ROWS.filter(r=>isMulti(k)?tokens(r[k]).indexOf(val)>=0
+                                  :String(r[k]||'').trim()===val);
+}
+async function renameLookup(k,item,next){
+  const nv=String(next||'').trim();
+  if(!nv||nv===item.title)return;
+  const hits=rowsUsing(k,item.title);
+  let move=false;
+  if(hits.length)move=confirm(hits.length+' row'+(hits.length>1?'s':'')+
+    ' still use "'+item.title+'". Update them to "'+nv+'" as well?');
+  if(lookupsOk&&item.id){
+    await resolveLookups();
+    await graph(lookupBase()+'/'+item.id+'/fields',{method:'PATCH',body:JSON.stringify({Title:nv})});
+  }
+  const old=item.title;item.title=nv;
+  CHOICES[k]=activeLookup(k);
+  if(move&&hits.length){
+    setCells(hits.map(r=>({row:r,k:k,
+      v:isMulti(k)?joinTokens(tokens(r[k]).map(t=>t===old?nv:t)):nv})));
+  }
+  applyView();
+}
+async function retireLookup(k,item,flag){
+  if(lookupsOk&&item.id){
+    await resolveLookups();
+    if(!LKF.inactive){toast('No Inactive column on '+LOOKUP_LIST+' — cannot retire values',3600);return;}
+    const f={};f[LKF.inactive]=flag?'Yes':'';
+    await graph(lookupBase()+'/'+item.id+'/fields',{method:'PATCH',body:JSON.stringify(f)});
+  }
+  item.inactive=!!flag;
+  CHOICES[k]=activeLookup(k);
+}
+
+/* ═══════════════════ AUTOSAVE ═══════════════════ */
+let saveQ=new Set(),saveTimer=null,saving=false,saveErr=null;
+const AUTOSAVE_MS=1100;
+function rowHasContent(r){return COLS.some(c=>c.t!=='img'&&String(r[c.k]||'').trim()!=='');}
+function queueSave(row){
+  if(LOCAL)return;
+  if(row)saveQ.add(row);
+  clearTimeout(saveTimer);
+  saveTimer=setTimeout(flushSave,AUTOSAVE_MS);
+  syncBtns();
+}
+function saveStatus(){
+  const el=$('sSave');
+  if(saveErr){
+    el.innerHTML='<b style="color:#b4452f">Save failed — click to retry</b>';
+    el.style.cursor='pointer';el.onclick=()=>{saveErr=null;flushSave();};
+    return;
+  }
+  el.style.cursor='default';el.onclick=null;
+  if(saving)el.innerHTML='<span style="color:var(--accentink);font-weight:600">Saving…</span>';
+  else if(saveQ.size||dirty.size)el.innerHTML='<span style="color:var(--muted)">Pending…</span>';
+  else el.innerHTML='<span style="color:#1d7a55;font-weight:600">✓ All changes saved</span>';
+}
+async function flushSave(){
+  if(saving||LOCAL)return;
+  if(!saveQ.size&&!deleted.length){saveStatus();return;}
+  saving=true;saveErr=null;saveStatus();
+  const batch=[...saveQ],dels=deleted.slice();
+  try{
+    await resolveList();
+    const base='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+listId+'/items';
+    for(const row of batch){
+      if(!row._id&&!rowHasContent(row)){saveQ.delete(row);continue;}
+      const f={};
+      for(const k in FIELD)f[FIELD[k]]=k==='date'
+        ?(row.date?new Date(row.date+'T12:00:00Z').toISOString():null):(row[k]||"");
+      if(row._id)await graph(base+'/'+row._id+'/fields',{method:'PATCH',body:JSON.stringify(f)});
+      else{const res=await graph(base,{method:'POST',body:JSON.stringify({fields:f})});row._id=res.id;}
+      saveQ.delete(row);
+      COLS.forEach(c=>dirty.delete(row._n+'|'+c.k));
+    }
+    for(const id of dels){
+      await graph(base+'/'+id,{method:'DELETE'});
+      deleted=deleted.filter(x=>x!==id);
+    }
+    saving=false;
+    renderWindow(1);
+    if(saveQ.size||deleted.length)queueSave(null);else saveStatus();
+  }catch(e){
+    saving=false;saveErr=e.message;saveStatus();
+    console.error('Autosave failed:',e);
+  }
+  syncBtns();
+}
+
+/* ═══════════════════ IMAGES ═══════════════════ */
+function resizeTo(file,max){
+  return new Promise((ok,bad)=>{
+    const img=new Image(),fr=new FileReader();
+    fr.onload=()=>{img.src=fr.result;};
+    fr.onerror=()=>bad(new Error('Cannot read file'));
+    img.onload=()=>{
+      const s=Math.min(1,max/Math.max(img.width,img.height));
+      const c=document.createElement('canvas');
+      c.width=Math.round(img.width*s);c.height=Math.round(img.height*s);
+      const x=c.getContext('2d');
+      x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);
+      x.drawImage(img,0,0,c.width,c.height);
+      c.toBlob(b=>b?ok(b):bad(new Error('Encode failed')),'image/jpeg',max>500?.86:.82);
+    };
+    img.onerror=()=>bad(new Error('Cannot decode this image (HEIC is not supported in Chrome)'));
+    fr.readAsDataURL(file);
+  });
+}
+async function uploadImage(key,file){
+  await resolveDrive();
+  for(const pair of [['thumb',360],['full',1400]]){
+    const blob=await resizeTo(file,pair[1]);
+    const url='https://graph.microsoft.com/v1.0/drives/'+driveId+'/root:/'+
+      encPath(IMG_PATH)+'/'+pair[0]+'/'+encodeURIComponent(key)+'.jpg:/content';
+    const r=await fetch(url,{method:'PUT',
+      headers:{Authorization:'Bearer '+(await getToken()),'Content-Type':'image/jpeg'},body:blob});
+    if(!r.ok)throw new Error('Upload '+pair[0]+' failed: '+r.status+' '+(await r.text()).slice(0,200));
+    const it=await r.json();
+    if(it['@microsoft.graph.downloadUrl'])imgMap[pair[0]+'/'+key]=it['@microsoft.graph.downloadUrl'];
+    imgWanted.add(key);
+  }
+}
+const keyOf=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9_-]/g,'');
+$('body').addEventListener('click',e=>{
+  const isAdd=e.target.classList.contains('addimg');
+  const isAlt=e.target.classList.contains('thumb')&&e.altKey;
+  if(!isAdd&&!isAlt)return;
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const td=e.target.closest('td'),row=VIEW[+td.dataset.r];
+  if(!row.style){toast('Give the row a style number first');return;}
+  const i=$('fpick');
+  i.onchange=async()=>{
+    const file=i.files[0];i.value='';if(!file)return;
+    const key=keyOf(row.style);
+    toast('Uploading photo for '+row.style+'…',6000);
+    try{
+      await uploadImage(key,file);
+      setCell(row,'img',key,true);renderWindow(1);
+      toast('Photo attached',2600);
+    }catch(err){alert('Upload failed:\n'+err.message);}
+  };
+  i.click();
+},true);
+
+/* ═══════════════════ NEW QUOTE ═══════════════════ */
+let nqFile=null;
+const NQ_FIELDS=['date','style','desc','brand','category','customer','season','action','stage','sensitive','sheet','note'];
+/* 'archived' is a data field only — never a grid column */
+function buildNq(){
+  const g=$('nqGrid');
+  [...g.querySelectorAll('.fld')].forEach(e=>e.remove());
+  NQ_FIELDS.forEach(k=>{
+    const col=COLS.find(c=>c.k===k);
+    const d=document.createElement('div');
+    d.className='fld'+(k==='note'||k==='desc'?' wide':'');
+    let inner;
+    if(col.t==='sel')
+      inner='<select id="nq_'+k+'"><option value=""></option>'+(CHOICES[k]||[]).map(o=>'<option>'+esc(o)+'</option>').join('')+'</select>';
+    else if(col.t==='date')
+      inner='<input type="date" id="nq_'+k+'" value="'+new Date().toISOString().slice(0,10)+'">';
+    else if(k==='note')inner='<textarea id="nq_'+k+'"></textarea>';
+    else inner='<input id="nq_'+k+'" autocomplete="off">';
+    d.innerHTML='<label>'+esc(col.h)+(k==='style'?' *':'')+'</label>'+inner;
+    if(k==='style'){
+      /* Ticking this leaves Style # alone until Add Quote is pressed, so a
+         cancelled dialog never burns a number. */
+      const w=document.createElement('label');
+      w.className='ck nqcad';
+      w.innerHTML='<input type="checkbox" id="nq_autocad"> Auto-assign CAD #';
+      w.title='Take the next number in the CAD sequence when this quote is added';
+      d.appendChild(w);
+      w.querySelector('input').onchange=e=>{
+        const f=$('nq_style');
+        f.disabled=e.target.checked;
+        f.placeholder=e.target.checked?'assigned on save':'';
+        if(e.target.checked)f.value='';
+        $('nqErr').textContent='';
+      };
+    }
+    g.appendChild(d);
+  });
+}
+function openNq(){
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  buildNq();nqFile=null;$('nqErr').textContent='';
+  $('nqDrop').innerHTML='<div class="dh">Drop a photo here</div><div class="dp">or click to browse<br>PNG · JPG</div>';
+  $('nq').classList.add('open');setTimeout(()=>$('nq_style').focus(),60);
+}
+function closeNq(){$('nq').classList.remove('open');}
+$('nqClose').onclick=closeNq;$('nqCancel').onclick=closeNq;
+$('nq').onclick=e=>{if(e.target.id==='nq')closeNq();};
+$('newQuote').onclick=openNq;
+/* RM80013_Pore_Tightening_Facial_Toner.jpg → RM80013 · Ruby & Millie · Pore Tightening Facial Toner */
+function parseFilename(name){
+  const base=String(name||'').replace(/\.[^.]+$/,'').trim();
+  if(!base)return null;
+  const parts=base.split(/[_]+/).filter(Boolean);
+  if(!parts.length)return null;
+  const style=parts[0].trim();
+  const pre=(style.match(/^([A-Za-z]+)/)||[])[1];
+  const brand=pre?(PREFIX_BRAND[pre.toUpperCase()]||''):'';
+  const desc=parts.slice(1).join(' ').replace(/[-]+/g,' ').replace(/\s+/g,' ').trim();
+  return {style:style,brand:brand,desc:desc};
+}
+function showDrop(file){
+  nqFile=file;
+  const fr=new FileReader();
+  fr.onload=()=>{$('nqDrop').innerHTML='<img src="'+fr.result+'" alt=""><div class="dp">'+esc(file.name)+' · click to replace</div>';};
+  fr.readAsDataURL(file);
+  /* autofill from the filename, but never overwrite something already typed */
+  const p=parseFilename(file.name);
+  if(!p)return;
+  const filled=[];
+  if(p.style&&!$('nq_style').value.trim()){$('nq_style').value=p.style;filled.push('style');}
+  if(p.desc&&!$('nq_desc').value.trim()){$('nq_desc').value=p.desc;filled.push('description');}
+  if(p.brand){
+    const sel=$('nq_brand');
+    if(sel&&!sel.value){
+      let hit=[...sel.options].find(o=>o.value===p.brand);
+      if(!hit){hit=new Option(p.brand,p.brand);sel.add(hit);}
+      sel.value=p.brand;filled.push('brand');
+    }
+  }
+  if(filled.length)toast('Filled '+filled.join(', ')+' from the filename',2800);
+}
+$('nqDrop').onclick=()=>{const i=$('fpick');i.onchange=()=>{if(i.files[0])showDrop(i.files[0]);i.value='';};i.click();};
+['dragenter','dragover'].forEach(ev=>$('nqDrop').addEventListener(ev,e=>{e.preventDefault();$('nqDrop').classList.add('hot');}));
+['dragleave','drop'].forEach(ev=>$('nqDrop').addEventListener(ev,e=>{e.preventDefault();$('nqDrop').classList.remove('hot');}));
+$('nqDrop').addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f&&f.type.indexOf('image/')===0)showDrop(f);});
+$('nqSave').onclick=async()=>{
+  const auto=$('nq_autocad')&&$('nq_autocad').checked;
+  let style=$('nq_style').value.trim();
+  if(!auto&&!style){$('nqErr').textContent='Style # is required.';return;}
+  if(!auto&&ROWS.some(r=>String(r.style).trim().toUpperCase()===style.toUpperCase())
+    &&!confirm('Style '+style+' already exists. Add another row anyway?'))return;
+  const btn=$('nqSave');btn.disabled=true;btn.textContent='Adding…';$('nqErr').textContent='';
+  try{
+    await resolveList();
+    /* the photo files under the style number, so the number has to exist
+       before the upload — a failure past this point burns it, which is the
+       intended one-way behaviour of the counter */
+    if(auto){
+      btn.textContent='Taking CAD #…';
+      style=(await reserveCad(1))[0];
+      $('nq_style').value=style;
+    }
+    const key=keyOf(style);
+    const o={_id:null,_n:ROWS.reduce((m,r)=>Math.max(m,r._n),0)+1};
+    NQ_FIELDS.forEach(k=>o[k]=$('nq_'+k).value.trim());
+    o.style=style;
+    o.img=nqFile?key:'';
+    if(nqFile){btn.textContent='Uploading photo…';await uploadImage(key,nqFile);}
+    const f={};
+    for(const k in FIELD)f[FIELD[k]]=k==='date'
+      ?(o.date?new Date(o.date+'T12:00:00Z').toISOString():null):(o[k]||'');
+    const res=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+listId+'/items',
+      {method:'POST',body:JSON.stringify({fields:f})});
+    o._id=res.id;
+    ROWS.push(o);learnChoices();applyView();
+    moveTo(VIEW.length-1,2);$('gw').scrollTop=$('gw').scrollHeight;
+    closeNq();toast('Added '+style+(nqFile?' with photo':''));
+  }catch(e){$('nqErr').textContent=e.message;}
+  btn.disabled=false;btn.textContent='Add Quote';
+};
+
+/* ═══════════════════ EXPORT → DEVELOPMENT TRACKER ═══════════════════
+   Column order matches the Development Tracker sheet. Fields the Quote
+   Tracker doesn't hold are written blank for filling in Excel.          */
+const DEV_COLS=[
+  {h:'Status',              w:9,  def:'Open'},
+  {h:'Date Created',        w:12, today:1, date:1},   /* export date, not the quote date */
+  {h:'Supplier',            w:14, f:'supplier'},      /* from the dialog */
+  {h:'PO#',                 w:10},
+  {h:'Quote#',              w:10, k:'sheet'},         /* Quote Sheet Name */
+  {h:'SR / BF / BS / FF #', w:15},
+  {h:'PPS Comment',         w:15},
+  {h:'Sample Type',         w:17, f:'sampletype'},    /* defaults to Artwork Sample */
+  {h:'Customer',            w:12, k:'customer'},
+  {h:'Style #',             w:14, k:'style'},
+  {h:'Item Description',    w:42, k:'desc', wrap:1}
+];
+async function buildDevBook(rows,F){
+  {
+    const wb=new ExcelJS.Workbook();
+    const ws=wb.addWorksheet('Development Tracker');
+    ws.columns=DEV_COLS.map(c=>({width:c.w}));
+    const thin={style:'thin',color:{argb:'FF000000'}};
+    const box={top:thin,left:thin,bottom:thin,right:thin};
+    const DFONT={name:'Calibri',size:10};
+    const hr=ws.addRow(DEV_COLS.map(c=>c.h));
+    hr.font={name:'Calibri',size:10,bold:true};
+    hr.alignment={horizontal:'center',vertical:'middle',wrapText:true};
+    hr.height=30;
+    hr.eachCell(c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF4DFD7'}};c.border=box;});
+    const today=new Date();
+    const todayUTC=new Date(Date.UTC(today.getFullYear(),today.getMonth(),today.getDate(),12));
+    rows.forEach(r=>{
+      const row=ws.addRow(DEV_COLS.map(c=>{
+        if(c.today)return todayUTC;
+        if(c.f)return F[c.f]||'';
+        if(c.k)return r[c.k]||'';
+        return c.def||'';
+      }));
+      row.alignment={horizontal:'center',vertical:'middle'};
+      row.font=DFONT;
+      row.eachCell({includeEmpty:true},c=>{c.border=box;c.font=DFONT;});
+      row.getCell(2).numFmt='mm/dd/yyyy';
+      DEV_COLS.forEach((c,i)=>{if(c.wrap)row.getCell(i+1).alignment={horizontal:'center',vertical:'middle',wrapText:true};});
+    });
+
+    /* ── grouped Quotes block, same sheet ────────────────────────────────
+       One row per Quote# rather than per style, with every Style # in that
+       quote joined into Products. Start row is computed from the tracker
+       rows above (ws.rowCount + GAP), never hardcoded, so it moves with the
+       data. GAP is the M1S two-blank-row section separator.
+       No wrap anywhere in this block — a long Products list runs on in one
+       line rather than growing the row. */
+    const GAP=2;
+    const groups=new Map();
+    rows.forEach(r=>{
+      const q=String(r.sheet||'').trim()||'(no quote #)';
+      if(!groups.has(q))groups.set(q,[]);
+      const st=String(r.style||'').trim();
+      if(st&&groups.get(q).indexOf(st)<0)groups.get(q).push(st);
+    });
+    const qKeys=[...groups.keys()].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+
+    let nextRow=ws.rowCount+GAP+1;
+    const gHead=['Date','Factory','File Name','Products','Customer'];
+    const hr2=ws.getRow(nextRow);
+    gHead.forEach((h,i)=>{
+      const c=hr2.getCell(i+1);
+      c.value=h;
+      c.font={name:'Calibri',size:10,bold:true};
+      c.alignment={horizontal:'center',vertical:'middle',wrapText:false};
+      c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF4DFD7'}};
+      c.border=box;
+    });
+    hr2.commit&&hr2.commit();
+    nextRow++;
+    qKeys.forEach(q=>{
+      const row=ws.getRow(nextRow);
+      const vals=[todayUTC, F.supplier||'', q, groups.get(q).join(' , '), rows.find(r=>
+        (String(r.sheet||'').trim()||'(no quote #)')===q)?.customer||''];
+      vals.forEach((v,i)=>{
+        const c=row.getCell(i+1);
+        c.value=v;
+        c.font={name:'Calibri',size:11};
+        c.border=box;
+        /* set wrap OFF explicitly rather than leaving alignment unset —
+           an unset alignment inherits, and Products came back wrapped */
+        c.alignment={vertical:'middle',wrapText:false};
+      });
+      row.getCell(1).numFmt='mm-dd-yy';
+      row.height=15;                 /* stops Excel auto-fitting it tall */
+      row.commit&&row.commit();
+      nextRow++;
+    });
+
+    ws.views=[{state:'frozen',ySplit:1}];
+    ws.pageSetup={orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0};
+    return wb;
+  }
+}
+function download(wb,name){
+  return wb.xlsx.writeBuffer().then(buf=>{
+    const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download=name;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+  });
+}
+
+/* ═══════════════════ SAMPLE REQUEST (factory-ready) ═══════════════════
+   Matches Sample_Request_Template.xlsx. Product photos are embedded in the
+   Picture column at true aspect ratio, so the file can go straight to the
+   factory with no follow-up attachments.                                  */
+const SR_COLS=[
+  {h:'Supplier',             w:14, f:'supplier'},
+  {h:'Picture',              w:16, pic:1},
+  {h:'Style#',               w:13, k:'style', wide:1},   /* autofits, never wraps */
+  {h:'Description',          w:14, k:'desc', wrap:1},
+  {h:'Sample Qty Needed',    w:13, f:'qty'},
+  /* The old build wrote the literal text "MM/DD/YYYY" into F and G. Once a cell
+     holds text, Excel keeps treating what the factory types as text, ISNUMBER
+     stays false and Sample Time never calculates — which is exactly what came
+     back. F and G now ship EMPTY with a real mm/dd/yyyy number format, and the
+     hint lives in the header label instead. */
+  {h:'Artwork Receive Date (MM/DD/YYYY)', w:15, dcell:1},
+  {h:'SRD (MM/DD/YYYY)',     w:15, dcell:1},
+  {h:'Sample Time',          w:12, days:1},            /* = SRD − Artwork Receive Date */
+  {h:'Notes',                w:30, blank:1}            /* internal notes stay internal */
+];
+const SR_ROWPT=105, SR_PAD=5;
+const colPx=ch=>Math.round(ch*7+5), ptPx=pt=>Math.round(pt*96/72);
+
+/* supplier names from the Factories list on the same site — dropdown only */
+let suppliers=null;
+async function loadSuppliers(){
+  if(suppliers)return suppliers;
+  suppliers=[];
+  try{
+    if(!siteId)siteId=(await graph('https://graph.microsoft.com/v1.0/sites/'+SP_HOST+':'+SITE_PATH+'?$select=id')).id;
+    const lists=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists?$select=id,name,displayName');
+    const f=lists.value.find(x=>x.name==='Factories'||x.displayName==='Factories');
+    if(f){
+      const it=await graph('https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+f.id+'/items?$expand=fields&$top=999');
+      const names=new Set();
+      it.value.forEach(x=>{
+        const fl=x.fields||{};
+        const v=fl.Title||fl.Supplier||fl.Factory||fl.FactoryName||fl.Name;
+        if(v)names.add(String(v).trim());
+      });
+      suppliers=[...names].sort((a,b)=>a.localeCompare(b));
+    }
+  }catch(e){console.warn('Could not read the Factories list:',e.message);}
+  const sel=$('sr_supplier');
+  if(suppliers.length){
+    sel.innerHTML='<option value="">— select a supplier —</option>'+
+      suppliers.map(x=>'<option value="'+esc(x)+'">'+esc(x)+'</option>').join('');
+  }else{
+    sel.innerHTML='<option value="">— no factories found —</option>';
+    $('srProg').textContent='Could not read the Factories list.';
+  }
+  return suppliers;
+}
+
+function openSr(defDev){
+  const rows=exportRows();
+  if(!rows.length){toast('Tick the checkbox on the rows you want first');return;}
+  const withPic=rows.filter(r=>r.img).length;
+  $('srCount').textContent=rows.length+' style'+(rows.length===1?'':'s')+' ticked · '+
+    withPic+' with a photo'+(withPic<rows.length?' ('+(rows.length-withPic)+' blank)':'');
+  $('srProg').textContent='';
+  if(!suppliers)$('sr_supplier').innerHTML='<option value="">Loading factories…</option>';
+  $('sr_doDev').checked=!!defDev;
+  $('sr_doSR').checked=!defDev;
+  /* reset each open — the last-used factory carrying over was how a request
+     went out under the wrong supplier */
+  if(suppliers&&suppliers.length)$('sr_supplier').value='';
+  $('sr_qty').value='';
+  $('sr_sampletype').value='Artwork Sample';
+  $('sr').classList.add('open');
+  loadSuppliers();
+  setTimeout(()=>$('sr_supplier').focus(),60);
+}
+function closeSr(){$('sr').classList.remove('open');}
+$('expSR').onclick=()=>openSr(false);
+$('expDev').onclick=()=>openSr(true);
+$('srClose').onclick=closeSr;$('srCancel').onclick=closeSr;
+$('sr').onclick=e=>{if(e.target.id==='sr')closeSr();};
+
+/* pull image bytes: pre-authenticated link first, Graph content as fallback */
+async function imageBytes(key){
+  const url=imgMap['thumb/'+key];
+  if(url){
+    try{const r=await fetch(url);if(r.ok)return await r.blob();}catch(e){}
+  }
+  try{
+    await resolveDrive();
+    const g='https://graph.microsoft.com/v1.0/drives/'+driveId+'/root:/'+
+      encPath(IMG_PATH)+'/thumb/'+encodeURIComponent(key)+'.jpg:/content';
+    const r=await fetch(g,{headers:{Authorization:'Bearer '+(await getToken())}});
+    if(r.ok)return await r.blob();
+  }catch(e){}
+  try{
+    const r=await fetch(IMG_BASE+'/thumb/'+encodeURIComponent(key)+'.jpg');
+    if(r.ok)return await r.blob();
+  }catch(e){}
+  return null;
+}
+const blobDims=async blob=>{
+  try{const bm=await createImageBitmap(blob);const d={w:bm.width,h:bm.height};
+    if(bm.close)bm.close();return d;}
+  catch(e){return {w:360,h:360};}
+};
+
+$('srGo').onclick=async()=>{
+  const rows=exportRows();
+  if(!rows.length){closeSr();return;}
+  if(typeof ExcelJS==='undefined'){toast('Excel library still loading — try again in a moment');return;}
+  const doSR=$('sr_doSR').checked,doDev=$('sr_doDev').checked;
+  if(!doSR&&!doDev){$('srProg').textContent='Pick at least one file to create.';return;}
+  const btn=$('srGo');btn.disabled=true;
+  const F={supplier:$('sr_supplier').value.trim(),qty:$('sr_qty').value.trim(),
+    sampletype:$('sr_sampletype').value};
+  const tag=(F.supplier||'Sample_Request').replace(/[^A-Za-z0-9_-]/g,'_');
+  const stamp=new Date().toISOString().slice(0,10);
+  try{
+    if(doDev){
+      $('srProg').textContent='Building Dev Tracker rows…';
+      const dwb=await buildDevBook(rows,F);
+      await download(dwb,'DevTracker_'+tag+'_'+stamp+'.xlsx');
+      if(!doSR){closeSr();toast('Dev Tracker file created · '+rows.length+' rows');btn.disabled=false;return;}
+    }
+    const wb=new ExcelJS.Workbook();
+    const ws=wb.addWorksheet('Sample Request');
+    ws.columns=SR_COLS.map(c=>({width:c.w}));
+    const thin={style:'thin',color:{argb:'FF000000'}};
+    const box={top:thin,left:thin,bottom:thin,right:thin};
+    const FONT={name:'Calibri',size:12};
+    const hr=ws.addRow(SR_COLS.map(c=>c.h));
+    hr.height=31.5;hr.font={name:'Calibri',size:12,bold:true};
+    hr.alignment={horizontal:'center',vertical:'middle',wrapText:true};
+    hr.eachCell(c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFD0CECE'}};c.border=box;});
+
+    const picCol=SR_COLS.findIndex(c=>c.pic);
+    let n=0,embedded=0;
+    for(const r of rows){
+      n++;
+      $('srProg').textContent='Building… '+n+'/'+rows.length;
+      const xlRow=n+1;                                   /* header occupies row 1 */
+      const fCol=SR_COLS.findIndex(c=>c.dcell)+1;
+      const gCol=SR_COLS.findIndex((c,i)=>c.dcell&&i>fCol-1)+1;
+      const L=i=>String.fromCharCode(64+i);
+      const vals=SR_COLS.map(c=>{
+        if(c.pic||c.blank||c.dcell)return null;
+        /* N() reads a real date straight through; the DATEVALUE arm catches a
+           date pasted in as text so the count still works. The day figure
+           carries its own singular/plural word. */
+        if(c.days){
+          const f=L(fCol)+xlRow,g=L(gCol)+xlRow;
+          const num=x=>'IFERROR(IF(ISNUMBER('+x+'),'+x+',DATEVALUE('+x+')),"")';
+          const d='('+num(g)+'-'+num(f)+')';
+          return {formula:'IF(OR('+num(f)+'="",'+num(g)+'=""),"",'+
+                          d+'&IF('+d+'=1," day"," days"))'};
+        }
+        if(c.f)return F[c.f]||'';
+        return r[c.k]||'';
+      });
+      const row=ws.addRow(vals);
+      row.height=SR_ROWPT;
+      row.font=FONT;
+      row.alignment={horizontal:'center',vertical:'middle',wrapText:true};
+      row.eachCell({includeEmpty:true},c=>{c.border=box;c.font=FONT;});
+      SR_COLS.forEach((c,i)=>{
+        const cell=row.getCell(i+1);
+        if(c.dcell){cell.font=FONT;cell.numFmt='mm/dd/yyyy';}
+        if(c.days)cell.alignment={horizontal:'center',vertical:'middle'};
+        if(c.wide)cell.alignment={horizontal:'center',vertical:'middle',wrapText:false};
+      });
+      if(!r.img)continue;
+      const blob=await imageBytes(r.img);
+      if(!blob)continue;
+      const d=await blobDims(blob);
+      const id=wb.addImage({buffer:await blob.arrayBuffer(),extension:'jpeg'});
+      ws.addImage(id,fitPhoto(picCol,SR_COLS[picCol].w,SR_ROWPT,n,d));
+      embedded++;
+    }
+    /* autofit: widen to the longest value, but never past the column's cap.
+       Picture stays pinned at 16 so the embedded image geometry holds. */
+    ws.getColumn(SR_COLS.findIndex(c=>c.pic)+1).width=16;
+    SR_COLS.forEach((c,i)=>{
+      if(c.pic)return;
+      let max=String(c.h).length;
+      ws.eachRow((row,n)=>{if(n===1)return;
+        const v=row.getCell(i+1).value;
+        const t=(v&&v.formula)?8:String(v==null?'':v).length;
+        if(t>max)max=t;});
+      const cap=c.wrap?c.w:(c.wide?40:Math.max(c.w,12));
+      ws.getColumn(i+1).width=Math.min(Math.max(max+2,8),cap);
+    });
+    ws.views=[{state:'frozen',ySplit:1}];
+    ws.pageSetup={orientation:'landscape',fitToPage:true,fitToWidth:1,fitToHeight:0,
+      margins:{left:.3,right:.3,top:.4,bottom:.4,header:.2,footer:.2}};
+    $('srProg').textContent='Writing file…';
+    await download(wb,'SampleRequest_'+tag+'_'+stamp+'.xlsx');
+    closeSr();
+    toast((doDev?'Both files created · ':'Sample request created · ')+
+      rows.length+' styles, '+embedded+' photos',3400);
+  }catch(e){$('srProg').textContent='';alert('Could not create the file:\n'+e.message);}
+  btn.disabled=false;
+};
+
+/* ═══════════════════ CUSTOM EXPORT ═══════════════════
+   Ticked rows, chosen columns, header row, nothing else. Image columns are
+   offered as the filename key rather than the picture — embedding photos is
+   what Sample Request is for. Column choice is remembered between exports. */
+const CX_KEY='qt_cxcols';
+/* The picker keeps its own Set rather than reading checkbox state out of the
+   DOM. The first build leaned on native <label><input> toggling and behaved
+   like a radio group — one column at a time. Explicit rows and an explicit
+   Set cannot do that, whatever the cause was. */
+let cxSel=new Set();
+function cxCols(){return COLS.filter(c=>cxSel.has(c.k)).map(c=>c.k);}
+function cxSync(){
+  const n=cxSel.size;
+  $('cxPicked').textContent=n+' of '+COLS.length+' columns';
+  $('cxGo').disabled=!n;
+  $('cxList').querySelectorAll('.cxrow').forEach(el=>{
+    const on=cxSel.has(el.dataset.k);
+    el.classList.toggle('on',on);
+    el.setAttribute('aria-checked',on?'true':'false');
+    el.querySelector('.bx').textContent=on?'☑':'☐';
+  });
+}
+function cxToggle(k){
+  cxSel.has(k)?cxSel.delete(k):cxSel.add(k);
+  cxSync();
+}
+function openCx(){
+  const rows=exportRows();
+  if(!rows.length){toast('Tick the checkbox on the rows you want first');return;}
+  let saved=null;try{saved=JSON.parse(ls(CX_KEY)||'null');}catch(e){}
+  cxSel=new Set(saved&&saved.length?COLS.filter(c=>saved.indexOf(c.k)>=0).map(c=>c.k)
+                                   :COLS.map(c=>c.k));
+  $('cxCount').textContent=rows.length+' row'+(rows.length===1?'':'s')+' ticked';
+  $('cxProg').textContent='';
+  $('cxList').innerHTML=COLS.map(c=>
+    '<div class="cxrow" role="checkbox" tabindex="0" data-k="'+esc(c.k)+'">'+
+    '<span class="bx">☐</span><span class="nm">'+esc(c.h)+'</span>'+
+    (c.t==='img'?'<span class="sfx">embeds the photo</span>':'')+
+    '</div>').join('');
+  $('cxList').querySelectorAll('.cxrow').forEach(el=>{
+    el.onclick=()=>cxToggle(el.dataset.k);
+    el.onkeydown=ev=>{
+      if(ev.key===' '||ev.key==='Enter'){ev.preventDefault();cxToggle(el.dataset.k);}
+    };
+  });
+  cxSync();
+  $('cx').classList.add('open');
+}
+function closeCx(){$('cx').classList.remove('open');}
+$('expCustom').onclick=openCx;
+$('cxClose').onclick=closeCx;$('cxCancel').onclick=closeCx;
+$('cx').onclick=e=>{if(e.target.id==='cx')closeCx();};
+$('cxAll').onclick=()=>{cxSel=new Set(COLS.map(c=>c.k));cxSync();};
+$('cxNone').onclick=()=>{cxSel.clear();cxSync();};
+$('cxGo').onclick=async()=>{
+  const rows=exportRows();
+  if(!rows.length){closeCx();return;}
+  if(typeof ExcelJS==='undefined'){toast('Excel library still loading — try again in a moment');return;}
+  const keys=cxCols();
+  if(!keys.length){$('cxProg').textContent='Pick at least one column.';return;}
+  ls(CX_KEY,JSON.stringify(keys));
+  const btn=$('cxGo');btn.disabled=true;
+  try{
+    $('cxProg').textContent='Building…';
+    const cols=keys.map(k=>COLS.find(c=>c.k===k)).filter(Boolean);
+    const picCol=cols.findIndex(c=>c.t==='img');      /* -1 when not selected */
+    const wb=new ExcelJS.Workbook();
+    const ws=wb.addWorksheet('Export');
+    const hr=ws.addRow(cols.map(c=>c.h));
+    hr.font={name:'Calibri',size:11,bold:true};
+    hr.alignment={horizontal:'center',vertical:'middle'};
+    rows.forEach(r=>{
+      const row=ws.addRow(cols.map(c=>{
+        if(c.t==='img')return null;                   /* the photo goes on top */
+        if(c.t==='date'){
+          if(!r.date)return '';
+          const d=new Date(r.date+'T12:00:00Z');
+          return isNaN(d)?String(r.date):d;
+        }
+        return r[c.k]==null?'':String(r[c.k]);
+      }));
+      row.font={name:'Calibri',size:11};
+      if(picCol>=0)row.alignment={horizontal:'center',vertical:'middle'};
+    });
+    /* widths first — image geometry is measured against the final column box */
+    cols.forEach((c,i)=>{
+      const col=ws.getColumn(i+1);
+      if(c.t==='img'){col.width=16;return;}
+      if(c.t==='date'){col.numFmt='mm/dd/yyyy';col.width=12;return;}
+      let max=String(c.h).length;
+      ws.eachRow((row,n)=>{if(n===1)return;
+        const t=String(row.getCell(i+1).value==null?'':row.getCell(i+1).value).length;
+        if(t>max)max=t;});
+      col.width=Math.min(Math.max(max+2,9),50);
+    });
+    let embedded=0;
+    if(picCol>=0){
+      /* same true-aspect embed as Sample Request: scale to fit the cell box,
+         centre it, and pin it to one cell so sorting cannot orphan it */
+      for(let n=0;n<rows.length;n++){
+        const r=rows[n];
+        ws.getRow(n+2).height=SR_ROWPT;
+        if(!r.img)continue;
+        $('cxProg').textContent='Fetching photos… '+(n+1)+'/'+rows.length;
+        const blob=await imageBytes(r.img);
+        if(!blob)continue;
+        const d=await blobDims(blob);
+        const id=wb.addImage({buffer:await blob.arrayBuffer(),extension:'jpeg'});
+        ws.addImage(id,fitPhoto(picCol,16,SR_ROWPT,n+1,d));
+        embedded++;
+      }
+    }
+    $('cxProg').textContent='Writing file…';
+    ws.views=[{state:'frozen',ySplit:1}];
+    await download(wb,'QuoteExport_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    closeCx();
+    toast('Exported '+rows.length+' rows × '+cols.length+' columns'+
+      (picCol>=0?' · '+embedded+' photos':''),3000);
+  }catch(e){$('cxProg').textContent='';alert('Could not create the file:\n'+e.message);}
+  btn.disabled=false;
+};
+
+/* ═══════════════════ FIXED TEMPLATES ═══════════════════
+   Geometry lifted from the two sample workbooks — column widths, row heights,
+   font sizes and thin borders are reproduced exactly so a downloaded sheet
+   matches the ones already in circulation. Columns with no k are deliberately
+   blank for the team or the factory to fill in. */
+/* Picture columns are WIDER than the hand-made drafts (15 chars ≈ 110px, far
+   narrower than the ~170px row height, so anything not portrait was squeezed
+   to a stamp). 24 chars ≈ 173px gives a roughly square box that matches the
+   row height, so portrait and landscape shots both fill it. Every other width
+   is the draft's. */
+const TPL_PPS={
+  file:'M1S_PPS_Comments', sheet:'Sheet1', font:11, headH:26.25, rowH:130.5,
+  cols:[{h:'Style #',w:8.9,k:'style'},
+        {h:'Picture',w:24,pic:1},
+        {h:'Description',w:12.4,k:'desc',wrap:1},
+        {h:'NAME M/DD',w:72,wrap:1}]        /* reviewer fills in name + date */
+};
+const TPL_QS={
+  file:'M1S_Quote_Sheet', sheet:'Sheet1', font:12, headH:27, rowH:119.25,
+  cols:[{h:'Style #',w:8.4,k:'style'},
+        {h:'Picture',w:24,pic:1},
+        {h:'Description',w:18.1,k:'desc',wrap:1},
+        {h:'Package',w:14.1,wrap:1},
+        {h:'Qty',w:8.5},
+        {h:'Price',w:10.6}]
+};
+/* ── one place that decides how a photo sits in its cell ──────────────────
+   The old anchor centred VERTICALLY by offsetting tl.row by a fraction of an
+   assumed row height. Excel multiplies that fraction by the row's REAL height,
+   so any drift between assumed and actual pushed the image down — and because
+   every photo has a different fraction, they crept further into the row below
+   as the sheet went on. Top-anchoring with a fixed pad removes the vertical
+   guess entirely: the only thing that has to be right is that the image is
+   shorter than the row, which the clamp guarantees. */
+/* ── photo placement ──────────────────────────────────────────────────────
+   Settled. Photo scaled to PHOTO_INSET of the estimated cell box, then CENTRED
+   in that box on both axes with fractional anchors, and the row keeps the
+   template's fixed height. Do not "improve" the two things below:
+
+     CENTRING FRACTIONS stay. tl:{col:3.42} is what puts the photo in the
+     middle of the column instead of jammed against its left border. A build
+     that anchored on whole-cell integers left every photo hugging the left
+     edge — visibly wrong next to the reference sheets.
+
+     ROWS STAY FIXED at the template height. A build that grew rows to fit each
+     photo produced a sheet with uneven row heights, which reads as broken even
+     though nothing overflowed.
+
+   PHOTO_INSET is the one dial. 0.86 leaves enough slack that the estimated box
+   being a little off does not push a photo out of its cell. Lower it if
+   anything ever overflows; raise it toward 1 for bigger photos. */
+const PHOTO_INSET=0.86;
+function fitPhoto(colIdx,colChars,rowPt,rowIdx,d){
+  const cellW=colPx(colChars), cellH=ptPx(rowPt);
+  const sc=Math.min(cellW*PHOTO_INSET/d.w, cellH*PHOTO_INSET/d.h);
+  const w=Math.max(1,Math.round(d.w*sc)), h=Math.max(1,Math.round(d.h*sc));
+  return {
+    tl:{col:colIdx+((cellW-w)/2)/cellW,        /* centred left-right */
+        row:rowIdx+((cellH-h)/2)/cellH},       /* centred top-bottom */
+    ext:{width:w,height:h},
+    editAs:'oneCell'
+  };
+}
+async function templateExport(tpl,label){
+  const rows=exportRows();
+  if(!rows.length){toast('Tick the checkbox on the rows you want first');return;}
+  if(typeof ExcelJS==='undefined'){toast('Excel library still loading — try again in a moment');return;}
+  const wb=new ExcelJS.Workbook();
+  const ws=wb.addWorksheet(tpl.sheet);
+  const THIN={style:'thin'};
+  const BORDER={top:THIN,left:THIN,bottom:THIN,right:THIN};
+  const F=n=>({name:'Calibri',size:tpl.font,bold:!!n});
+  const picIdx=tpl.cols.findIndex(c=>c.pic);
+
+  const hr=ws.addRow(tpl.cols.map(c=>c.h));
+  hr.height=tpl.headH;
+  hr.eachCell(c=>{c.font=F();c.border=BORDER;
+    c.alignment={horizontal:'center',vertical:'middle',wrapText:true};});
+
+  rows.forEach(r=>{
+    const row=ws.addRow(tpl.cols.map(c=>c.pic||!c.k?null:(r[c.k]==null?'':String(r[c.k]))));
+    row.height=tpl.rowH;
+    row.eachCell({includeEmpty:true},(c,i)=>{
+      const spec=tpl.cols[i-1];if(!spec)return;
+      c.font=F();c.border=BORDER;
+      c.alignment={horizontal:'center',vertical:'middle',wrapText:!!spec.wrap};
+    });
+  });
+  tpl.cols.forEach((c,i)=>{ws.getColumn(i+1).width=c.w;});
+
+  let embedded=0;
+  if(picIdx>=0){
+    for(let n=0;n<rows.length;n++){
+      const r=rows[n];
+      if(!r.img)continue;
+      toast(label+' · photo '+(n+1)+'/'+rows.length,900);
+      const blob=await imageBytes(r.img);
+      if(!blob)continue;
+      const d=await blobDims(blob);
+      const id=wb.addImage({buffer:await blob.arrayBuffer(),extension:'jpeg'});
+      ws.addImage(id,fitPhoto(picIdx,tpl.cols[picIdx].w,tpl.rowH,n+1,d));
+      embedded++;
+    }
+  }
+  await download(wb,tpl.file+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  toast(label+' · '+rows.length+' rows, '+embedded+' photos',3000);
+}
+$('expPPS').onclick=()=>templateExport(TPL_PPS,'PPS Sheet');
+$('expQS').onclick=()=>templateExport(TPL_QS,'Quote Sheet');
+
+function goTop(){$('gw').scrollTop=0;renderWindow(1);if(VIEW.length)moveTo(0,cur.c);}
+function goBottom(){
+  const gw=$('gw');
+  gw.scrollTop=gw.scrollHeight;
+  renderWindow(1);
+  if(VIEW.length)moveTo(VIEW.length-1,cur.c);
+  gw.scrollTop=gw.scrollHeight;
+}
+$('jTop').onclick=goTop;
+$('jBot').onclick=goBottom;
+
+/* ═══════════════════ MANAGE LISTS ═══════════════════ */
+let lkType='brand';
+function openLk(){
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  $('lkSrc').textContent=lookupsOk
+    ? 'Reading from the '+LOOKUP_LIST+' list. Changes save immediately.'
+    : LOOKUP_LIST+' was not found — values are being learned from existing rows, and '+
+      'anything added here lasts only for this session.';
+  drawLkTypes();drawLkList();
+  $('lk').classList.add('open');
+  setTimeout(()=>$('lkNew').focus(),60);
+}
+function closeLk(){$('lk').classList.remove('open');learnChoices();buildSide();renderWindow(1);}
+$('lkBtn').onclick=openLk;$('lkClose').onclick=closeLk;
+$('lk').onclick=e=>{if(e.target.id==='lk')closeLk();};
+
+function drawLkTypes(){
+  const host=$('lkTypes');
+  host.innerHTML=Object.keys(LOOKUP_TYPES).map(t=>{
+    const k=LOOKUP_TYPES[t];
+    const n=lookupsOk?(lookups[k]||[]).filter(x=>!x.inactive).length:(CHOICES[k]||[]).length;
+    return '<button data-k="'+k+'"'+(k===lkType?' class="on"':'')+'>'+esc(t)+
+           '<span class="n">'+n+'</span></button>';
+  }).join('');
+  host.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+    lkType=b.dataset.k;drawLkTypes();drawLkList();});
+}
+function drawLkList(){
+  const k=lkType;
+  const items=lookupsOk?(lookups[k]||[]).slice()
+    :(CHOICES[k]||[]).map(t=>({id:null,title:t,inactive:false}));
+  if(!items.length){$('lkList').innerHTML='<div style="padding:18px;text-align:center;color:var(--muted);font-size:12px">No values yet.</div>';return;}
+  $('lkList').innerHTML=items.map((it,i)=>{
+    const used=rowsUsing(k,it.title).length;
+    return '<div class="lkrow'+(it.inactive?' off':'')+'" data-i="'+i+'">'+
+      '<span class="v">'+esc(it.title)+'</span>'+
+      '<span class="u">'+used+' row'+(used===1?'':'s')+'</span>'+
+      '<button data-a="ren">Rename</button>'+
+      '<button data-a="ret">'+(it.inactive?'Restore':'Retire')+'</button></div>';
+  }).join('');
+  $('lkList').querySelectorAll('button').forEach(b=>{
+    b.onclick=async()=>{
+      const idx=+b.closest('.lkrow').dataset.i,it=items[idx];
+      b.disabled=true;
+      try{
+        if(b.dataset.a==='ren'){
+          const nv=prompt('Rename "'+it.title+'" to:',it.title);
+          if(nv!=null)await renameLookup(k,it,nv);
+        }else{
+          await retireLookup(k,it,!it.inactive);
+        }
+        drawLkTypes();drawLkList();
+      }catch(err){alert(err.message);}
+      b.disabled=false;
+    };
+  });
+}
+$('lkAdd').onclick=async()=>{
+  const v=$('lkNew').value.trim();
+  if(!v)return;
+  $('lkAdd').disabled=true;
+  try{await addLookup(lkType,v);$('lkNew').value='';drawLkTypes();drawLkList();}
+  catch(e){alert(e.message);}
+  $('lkAdd').disabled=false;$('lkNew').focus();
+};
+$('lkNew').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('lkAdd').onclick();}};
+
+/* ═══════════════════ LIGHTBOX ═══════════════════ */
+let lbIdx=-1,lbList=null;
+function openLb(vi){
+  lbList=VIEW.map((r,i)=>({r:r,i:i})).filter(o=>o.r.img);
+  lbIdx=lbList.findIndex(o=>o.i===vi);
+  if(lbIdx<0)return;
+  lbShow();$('lb').classList.add('open');
+}
+function lbShow(){
+  const r=lbList[lbIdx].r;
+  const im=$('lbImg');
+  im.onerror=()=>{im.onerror=null;im.src=thumbSrc(r.img);};
+  if(imgMap['full/'+r.img]){im.src=fullSrc(r.img);}
+  else{
+    im.src=thumbSrc(r.img);                     /* something to look at now */
+    const want=r.img;
+    Promise.resolve(ensureFullMap()).then(()=>{
+      /* ignore if the user has already stepped to another photo */
+      if(lbList[lbIdx]&&lbList[lbIdx].r.img===want&&imgMap['full/'+want])im.src=fullSrc(want);
+    });
+  }
+  $('lbStyle').textContent=r.style||'—';
+  $('lbDesc').textContent=r.desc||'';
+  $('lbDl').innerHTML=['brand','category','customer','season','action','stage','sheet','date','note']
+    .map(k=>{const col=COLS.find(c=>c.k===k),v=k==='date'?fmtDate(r.date):r[k];
+      return (col&&v)?'<dt>'+esc(col.h)+'</dt><dd>'+esc(v)+'</dd>':'';}).join('');
+}
+function lbStep(d){if(!lbList)return;lbIdx=(lbIdx+d+lbList.length)%lbList.length;lbShow();}
+function closeLb(){$('lb').classList.remove('open');}
+$('lbClose').onclick=closeLb;$('lbPrev').onclick=()=>lbStep(-1);$('lbNext').onclick=()=>lbStep(1);
+$('lb').onclick=e=>{if(e.target.id==='lb')closeLb();};
+
+/* ═══════════════════ ROW HEIGHT + PREFS ═══════════════════ */
+function segThumb(seg){
+  const el=$(seg),thumb=el.querySelector('.segthumb'),on=el.querySelector('button.on');
+  if(!thumb||!on)return;
+  thumb.style.left=(on.offsetLeft)+'px';
+  thumb.style.width=(on.offsetWidth)+'px';
+}
+function setRowH(b){
+  [...$('rowseg').querySelectorAll('button')].forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  segThumb('rowseg');
+  ROWH=+b.dataset.r;rowHEff=null;
+  document.documentElement.style.setProperty('--rowh',b.dataset.r+'px');
+  document.documentElement.style.setProperty('--imgh',b.dataset.i+'px');
+  ls('qt_rows',b.dataset.r);renderWindow(1);
+}
+$('rowseg').onclick=e=>{const b=e.target.closest('button');if(b)setRowH(b);};
+addEventListener('resize',()=>{segThumb('rowseg');segThumb('viewseg');});
+let preArchSort=null;
+$('viewseg').onclick=e=>{
+  const b=e.target.closest('button');if(!b)return;
+  [...$('viewseg').querySelectorAll('button')].forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  segThumb('viewseg');
+  const was=viewMode;
+  viewMode=b.dataset.v;picked.clear();
+  $('archBtn').textContent=viewMode==='arch'?'Restore':'Archive';
+  /* Archive opens oldest-first; leaving it puts the previous sort back.
+     Clicking a header while in Archive still overrides. */
+  if(viewMode==='arch'&&was!=='arch'){
+    preArchSort={k:sortK,d:sortDir};
+    sortK='date';sortDir=1;
+  }else if(viewMode!=='arch'&&was==='arch'&&preArchSort){
+    sortK=preArchSort.k;sortDir=preArchSort.d;preArchSort=null;
+  }
+  syncSortBtns();
+  applyView();
+};
+$('archBtn').onclick=()=>{
+  if(LOCAL){toast('Demo mode is read-only');return;}
+  const rows=picked.size?[...picked]:VIEW.slice(selRange().r1,selRange().r2+1);
+  if(!rows.length)return;
+  const unarch=viewMode==='arch';
+  setCells(rows.map(r=>({row:r,k:'archived',v:unarch?'':'Yes'})));
+  picked.clear();applyView();
+  toast(rows.length+' row'+(rows.length>1?'s':'')+' '+(unarch?'restored':'archived')+' · Ctrl+Z to undo',3200);
+};
+(function(){
+  try{const w=JSON.parse(ls('qt_w')||'null');if(w&&w.length===COLS.length)COLS.forEach((c,i)=>c.w=w[i]);}catch(e){}
+  const rh=ls('qt_rows');
+  const rbtns=[...$('rowseg').querySelectorAll('button')];
+  const btn=rbtns.find(x=>x.dataset.r===rh)||rbtns.find(x=>x.dataset.r==='76');
+  rbtns.forEach(x=>x.classList.remove('on'));btn.classList.add('on');
+  ROWH=+btn.dataset.r;
+  document.documentElement.style.setProperty('--rowh',btn.dataset.r+'px');
+  document.documentElement.style.setProperty('--imgh',btn.dataset.i+'px');
+  if(ls('qt_side')!=='0'){$('side').classList.add('col');$('sideTog').textContent='›';}
+  requestAnimationFrame(()=>{segThumb('rowseg');segThumb('viewseg');});
+})();
+addEventListener('beforeunload',e=>{
+  if(saveQ.size||saving||deleted.length){e.preventDefault();e.returnValue='';}});
+/* last-chance flush if the tab is hidden mid-edit */
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&saveQ.size)flushSave();});
+startAutoReload();
+boot();
+</script>
+</body>
+</html>
