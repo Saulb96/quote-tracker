@@ -162,8 +162,8 @@
   Sheet Calibri 12. Both embed photos in the Picture
   column and are driven by the row checkboxes.
 
-  DEV TRACKER export is ONE sheet with TWO sections. Top: the 11 tracker
-  columns, one row per selected style. Then two blank rows, then a grouped
+  DEV TRACKER export is ONE sheet with TWO sections. Top: the 11 Dev PLM
+  columns in its screen order (paste-ready), one row per style. Then two blank rows, then a grouped
   Quotes block — Date / Factory / File Name / Products / Customer, ONE row per
   Quote# with every Style # in that quote joined by " , ". The block's start
   row is ws.rowCount + GAP, never hardcoded, so it follows the data. Both
@@ -2888,21 +2888,25 @@ $('nqSave').onclick=async()=>{
 };
 
 /* ═══════════════════ EXPORT → DEVELOPMENT TRACKER ═══════════════════
-   Column order matches the Development Tracker sheet. Fields the Quote
-   Tracker doesn't hold are written blank for filling in Excel.          */
+   Column order and headers match the Dev PLM Dev Tracker screen (A–K), so
+   the rows paste straight in. Fields the Quote Tracker doesn't hold are
+   written blank for filling in. Customer uses the PLM's list spelling.   */
+const DEV_CUSTOMER={GT:'Giant Tiger',TJMaxx:'TJX',M1S:'M1S Stock'};
 const DEV_COLS=[
   {h:'Status',              w:9,  def:'Open'},
   {h:'Date Created',        w:12, today:1, date:1},   /* export date, not the quote date */
   {h:'Supplier',            w:14, f:'supplier'},      /* from the dialog */
+  {h:'Style #',             w:14, k:'style'},
+  {h:'Item Description',    w:42, k:'desc', wrap:1},
   {h:'PO#',                 w:10},
   {h:'Quote#',              w:10, k:'sheet'},         /* Quote Sheet Name */
   {h:'SR / BF / BS / FF #', w:15},
-  {h:'PPS Comment',         w:15},
+  {h:'PPS Comments #',      w:15},
   {h:'Sample Type',         w:17, f:'sampletype'},    /* defaults to Artwork Sample */
-  {h:'Customer',            w:12, k:'customer'},
-  {h:'Style #',             w:14, k:'style'},
-  {h:'Item Description',    w:42, k:'desc', wrap:1}
+  {h:'Customer',            w:12, k:'customer', map:DEV_CUSTOMER}
 ];
+/* PLM paste splits on tabs and line breaks, so a cell must hold neither */
+const devCell=v=>String(v||'').replace(/[\t\r\n]+/g,' ').trim();
 async function buildDevBook(rows,F){
   {
     const wb=new ExcelJS.Workbook();
@@ -2922,7 +2926,7 @@ async function buildDevBook(rows,F){
       const row=ws.addRow(DEV_COLS.map(c=>{
         if(c.today)return todayUTC;
         if(c.f)return F[c.f]||'';
-        if(c.k)return r[c.k]||'';
+        if(c.k){const v=devCell(r[c.k]);return (c.map&&c.map[v])||v;}
         return c.def||'';
       }));
       row.alignment={horizontal:'center',vertical:'middle'};
