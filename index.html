@@ -112,8 +112,10 @@
   it was made stays, and the question names it; one someone else has changed is
   caught as it is deleted (the DELETE carries the ETag of this page's last save,
   and a refusal is checked against the item as it now is) and comes back to the
-  grid as SharePoint has it, with a message. Redo does not bring a deleted item
-  back. Undo of edits to existing items is unchanged.
+  grid as SharePoint has it, with a message; so does one SharePoint will not
+  let this account delete. Only changes since this page's last save of the
+  item are seen: every save sends the whole row. Redo does not bring a deleted
+  item back. Undo of edits to existing items is unchanged.
 
   PASTE fills a selection Excel-style: a copied block smaller than the selected
   range tiles to fill it, so one cell pasted over 40 selected rows lands in all
@@ -167,8 +169,9 @@
   canvas). Typing straight into a cell still replaces the contents. An open
   editor stays open through the scroll that brings its cell into view, a
   sideways scroll while it sits in a frozen column, and a resize; on a phone the
-  browser does all three as you type (the frozen columns are wider than the
-  screen), and closing the editor there kept only the last key.
+  browser does all three as you type (the frozen columns fill the grid's
+  width), and closing the editor there kept only the last key. The rows are
+  redrawn once it closes.
 
   TEMPLATE EXPORTS: "PPS Sheet" and "Quote Sheet" reproduce the two circulated
   workbooks — row heights (130.5pt / 119.25pt), Calibri 11 / 12, thin borders on
@@ -1545,7 +1548,11 @@ async function load(quiet){
     blank:onBlank(),   /* on the blank line it stays there, never on a row someone else added */
     picked:[...picked].map(r=>r._id).filter(Boolean)
   }:null;
-  ROWS=[];dirty.clear();deleted=[];undoDel.clear();undoStack=[];syncBtns();
+  /* Redo and the save queue go too: their rows are the ones before the reload
+     (a Reload only gets here with nothing waiting, or after "Reload anyway?").
+     A Redo after it, or the next autosave, sent those rows' old fields over
+     whatever others had saved since, or made an item Reload had dropped. */
+  ROWS=[];dirty.clear();saveQ.clear();deleted=[];undoDel.clear();undoStack=[];redoStack=[];syncBtns();
   imgQueue=[];imgWanted.clear();bulkDone=false;
   $('body').innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:var(--muted)">Loading…</td></tr>';
   try{
@@ -1622,7 +1629,7 @@ function startAutoReload(){
   if(autoTimer)clearInterval(autoTimer);
   autoTimer=setInterval(()=>{
     if(LOCAL||document.hidden||isThrottled())return;
-    if(saveQ.size||saving||saveErr||editing||dialogOpen())return;
+    if(saveQ.size||deleted.length||saving||saveErr||editing||dialogOpen())return;
     load(true);
   },AUTO_RELOAD_MS);
 }
@@ -2071,8 +2078,13 @@ $('gw').addEventListener('scroll',()=>{
   /* re-rendering under an open editor destroys its DOM node and leaves a white
      hole — close it first, then repaint */
   if($('mpick').classList.contains('open'))commitMulti();
-  if(editing&&!edStays())commitEdit();
   if($('fmenu').classList.contains('open'))$('fmenu').classList.remove('open');
+  /* an editor that stays open is not drawn over either: on a long list a
+     resize changes the rows drawn, and redrawing them here rebuilt the grid
+     under it, so what was typed before the resize was lost. They are drawn
+     once it closes. */
+  if(editing&&edStays()){redrawWhenIdle();return;}
+  if(editing)commitEdit();
   renderWindow(0);
 },{passive:true});
 /* a resize (a phone's keyboard coming up, say) leaves an open editor open: its
@@ -2415,9 +2427,10 @@ function beginEdit(seed){
      the grid. That focus used to scroll the grid to the cell, the grid's scroll
      handler closed the editor at once, and every key after it started a fresh
      type-over edit: typing "abc" into a cell scrolled out of view saved "c". On
-     a phone it was every Style and Description cell — the frozen columns are
-     wider than the screen, so those two sit past the grid's right edge and no
-     scroll brings them into view (edStays). */
+     a phone it was every Style and Description cell — the frozen columns fill
+     the grid's width, so those two sit past its right edge (scrolled fully
+     right, they are drawn over Date Created and Image) and the browser scrolls
+     the grid sideways as each key is typed (edStays). */
   td.scrollIntoView({block:'nearest',inline:'nearest'});
   renderWindow(0);td=cellEl(cur.r,cur.c);if(!td)return;
   edAt=gwAt(td.classList.contains('stk'));
@@ -2674,8 +2687,13 @@ function undoMade(step){
   const ask=gone.length>1?'Delete the '+gone.length+' items just added?'
     :'Delete the item just added'+(gone[0].style?' ('+gone[0].style+')':'')+'?';
   if(!confirm(ask+(stays?'\n\n'+stays:''))){undoStack.push(step);return;}
-  if(gone.indexOf(VIEW[cur.r])>=0)cur.r=VIEW.length;   /* back on the blank line they came from */
+  /* the cursor stays on the row it was on; on one of these, it goes back to the
+     blank line they came from. Left at its place in the view, it landed on
+     whatever row moved up there, and the next key overwrote that row. */
+  const at=onBlank()?null:VIEW[cur.r];
+  if(at&&gone.indexOf(at)>=0)cur.r=VIEW.length;
   dropRows(gone,true);
+  if(at&&gone.indexOf(at)<0&&VIEW.indexOf(at)>=0)moveTo(VIEW.indexOf(at),cur.c);
   toast('Deleted '+gone.length+' item'+(gone.length>1?'s':'')+(stays?' · '+stays:''),stays?5000:2200);
 }
 function doRedo(){
@@ -2775,8 +2793,17 @@ function dropRows(gone,byUndo){
   undoStack=undoStack.filter(forget);redoStack=redoStack.filter(forget);
   queueSave(null);applyView();
 }
+/* a delete still waiting for the autosave (Delete row, Undo of items just made)
+   is sent first too, and a save under way is waited for. The load empties the
+   waiting deletes, so a Reload within a second of a delete brought the item
+   back; and flushSave returns at once while a save is under way, so the load
+   could read the list before that save had landed. */
 $('reload').onclick=async()=>{
-  if(saveQ.size||saving){toast('Finishing save first…');await flushSave();}
+  if(saveQ.size||saving||deleted.length){
+    toast('Finishing save first…');
+    while(saving)await new Promise(r=>setTimeout(r,150));
+    await flushSave();
+  }
   if(saveErr&&!confirm('There is an unsaved change that failed. Reload anyway?'))return;
   load();
 };
@@ -2916,7 +2943,9 @@ function saveStatus(){
 }
 async function flushSave(){
   if(saving||LOCAL)return;
-  if(!saveQ.size&&!deleted.length){saveStatus();return;}
+  /* nothing left to save: a failure was about a row since deleted (an Undo of
+     an item SharePoint refused to create, say), so "Save failed" goes too */
+  if(!saveQ.size&&!deleted.length){saveErr=null;saveStatus();return;}
   saving=true;saveErr=null;saveStatus();
   const batch=[...saveQ],dels=deleted.slice();
   try{
@@ -2935,8 +2964,10 @@ async function flushSave(){
       /* the item as SharePoint now holds it, as far as this page knows (undoDelete) */
       row._etag=res&&res['@odata.etag']||null;row._sent=sent;
       if(fresh&&row._gone){deleted.push(row._id);if(row._gone==='undo')undoDel.set(row._id,row);}   /* deleted while it was being created */
-      saveQ.delete(row);
-      undirty(row);
+      /* changed while this save was under way (a key, an Undo), it stays queued
+         for the next autosave. It used to come off the queue here: the change was
+         never sent, and the page still said "All changes saved". */
+      if(fieldsOf(row)===sent){saveQ.delete(row);undirty(row);}
     }
     for(const id of dels){
       const mine=undoDel.get(id);
@@ -2959,14 +2990,24 @@ async function flushSave(){
    refusal is checked against the item as it is now: just what this page last
    sent, and nobody else changed it, so it goes; anything else, and it comes
    back to the grid as SharePoint has it, and the page says so. Without an ETag
-   from the last save the delete goes as Delete row's does. */
+   from the last save the delete goes as Delete row's does. Every save sends the
+   whole row, so a change someone else made before this page's last save of the
+   item was already overwritten by that save; only changes since are caught.
+   An account SharePoint lets add items but not delete them (403) gets the item
+   back in the grid the same way, rather than a row gone from the grid while
+   the item stays in the list and "Save failed" for good. */
 async function undoDelete(base,id,row){
+  let denied=false;
   try{await graph(base+'/'+id,{method:'DELETE',headers:row._etag?{'if-match':row._etag}:{}});return;}
-  catch(e){if(/^404\b/.test(e.message))return;if(!/^412\b/.test(e.message))throw e;}   /* 404: gone already */
+  catch(e){
+    if(/^404\b/.test(e.message))return;   /* gone already */
+    denied=/^403\b/.test(e.message);
+    if(!denied&&!/^412\b/.test(e.message))throw e;
+  }
   const it=await graph(base+'/'+id+'?$expand=fields($select='+Object.values(FIELD).join(',')+')');
   const f=it.fields||{},now={};
   for(const k in FIELD)now[k]=k==='date'?toISO(f[FIELD.date]):(f[FIELD[k]]||"");
-  if(fieldsOf(now)===row._sent){await graph(base+'/'+id,{method:'DELETE'});return;}
+  if(!denied&&fieldsOf(now)===row._sent){await graph(base+'/'+id,{method:'DELETE'});return;}
   Object.assign(row,now);delete row._gone;row._etag=it['@odata.etag']||null;row._sent=fieldsOf(now);
   scentSync([row]);ROWS.push(row);
   /* into the view once no editor is open, the cursor on the row it was on */
@@ -2976,7 +3017,8 @@ async function undoDelete(base,id,row){
     if(at&&VIEW.indexOf(at)>=0){cur.r=VIEW.indexOf(at);paintSel();}
   };
   back();
-  toast((row.style||'An item')+' was changed by someone else after it was added, so it was not deleted',6000);
+  toast(denied?(row.style||'An item')+' was not deleted: SharePoint does not let this account delete items'
+    :(row.style||'An item')+' was changed by someone else after it was added, so it was not deleted',6000);
 }
 
 /* ═══════════════════ IMAGES ═══════════════════ */
@@ -3897,7 +3939,7 @@ $('archBtn').onclick=()=>{
 addEventListener('beforeunload',e=>{
   if(saveQ.size||saving||deleted.length){e.preventDefault();e.returnValue='';}});
 /* last-chance flush if the tab is hidden mid-edit */
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&saveQ.size)flushSave();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&(saveQ.size||deleted.length))flushSave();});
 startAutoReload();
 boot();
 </script>
