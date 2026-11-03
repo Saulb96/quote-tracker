@@ -68,11 +68,14 @@
   FROZEN through Description (Date Created, Image, Style, Description), plus the
   checkbox and row-number columns. A FILL_W-wide blank column sits to the right
   of the last column and FILL_ROWS blank rows sit under the last data row.
-  The right-hand margin is inert. The blank ROWS are not: clicking one calls
-  claimFiller(), which appends a real row via appendRow() and drops the cursor
-  in the column clicked — "+ Row" but landing where you aimed. The row stays
-  unsaved until a field has a value, so a stray click costs nothing. One row per
-  click, whichever blank line was clicked. The header row
+  The right-hand margin is inert. The blank ROWS are not: clicking one puts the
+  cursor on the FIRST blank line, in the column clicked (cur.r===VIEW.length),
+  and adds nothing. The row is created only when a value lands there — typed,
+  picked, pasted or Ctrl+D (setCell / setCells take that row into ROWS) — so a
+  click, arrowing along it, or opening an editor or dropdown there and leaving
+  adds no row and writes nothing to SharePoint. It used to append a real row on
+  every click, pre-filled with today's date, and that date counted as a value:
+  a Delete over one of those rows saved an empty item. The header row
   stays pinned
   (CSS position:sticky on thead). Column geometry comes from the <colgroup>,
   never from cell content, so scrolling cannot resize a column. The grid opens
@@ -270,6 +273,7 @@
   tr.fillr td.chk,tr.fillr td.num,tr.fillr td.fillc{cursor:default}
   tr.fillr td[data-fc]:hover{background:rgba(47,155,214,.09);
     box-shadow:inset 0 0 0 1px rgba(47,155,214,.35)}
+  tr.fillr td[data-fc].sel{box-shadow:inset 0 0 0 2px var(--sel)}   /* the cursor on the blank line */
   .imgwait{display:block;width:100%;height:var(--imgh);border-radius:8px;
     background:linear-gradient(100deg,rgba(95,108,125,.06) 30%,rgba(95,108,125,.13) 50%,rgba(95,108,125,.06) 70%);
     background-size:220% 100%;animation:imgsh 1.5s linear infinite}
@@ -1503,6 +1507,7 @@ async function load(quiet){
   const keep=quiet?{
     top:$('gw').scrollTop,
     cur:{r:cur.r,c:cur.c},
+    blank:onBlank(),   /* on the blank line it stays there, never on a row someone else added */
     picked:[...picked].map(r=>r._id).filter(Boolean)
   }:null;
   ROWS=[];dirty.clear();deleted=[];undoStack=[];syncBtns();
@@ -1559,7 +1564,7 @@ async function load(quiet){
     const want=new Set(keep.picked);
     picked=new Set(ROWS.filter(r=>want.has(r._id)));
     applyView();
-    cur.r=Math.min(keep.cur.r,Math.max(0,VIEW.length-1));cur.c=keep.cur.c;
+    cur.r=keep.blank&&VIEW.length?VIEW.length:Math.min(keep.cur.r,Math.max(0,VIEW.length-1));cur.c=keep.cur.c;
     requestAnimationFrame(()=>{$('gw').scrollTop=keep.top;renderWindow(1);paintSel();});
     toast('Refreshed · '+ROWS.length+' rows',2000);
     return;
@@ -1951,7 +1956,7 @@ function buildRow(r,vi){
   const tdf=document.createElement('td');tdf.className='fillc';tr.appendChild(tdf);
   return tr;
 }
-/* blank grid under the data — not selectable, purely visual */
+/* blank grid under the data; its first line is where a new row is typed */
 function fillerRow(){
   const tr=document.createElement('tr');tr.className='fillr';
   tr.innerHTML='<td class="chk"></td><td class="num"></td>'+
@@ -2017,6 +2022,7 @@ addEventListener('resize',()=>renderWindow(1));
 
 /* patch a single cell without rebuilding the table */
 function patchCell(vi,ci){
+  if(vi===VIEW.length){const b=cellEl(vi,ci);if(b)b.innerHTML='';return;}   /* the blank line holds nothing */
   const td=$('body').querySelector('td[data-r="'+vi+'"][data-c="'+ci+'"]');
   if(!td)return;
   const r=VIEW[vi],c=COLS[ci];
@@ -2026,7 +2032,9 @@ function patchCell(vi,ci){
 }
 
 /* ═══════════════════ SELECTION ═══════════════════ */
-const cellEl=(r,c)=>$('body').querySelector('td[data-r="'+r+'"][data-c="'+c+'"]');
+const cellEl=(r,c)=>$('body').querySelector(r===VIEW.length
+  ?'tr.fillr td[data-fc="'+c+'"]'                  /* the blank line: the first filler row */
+  :'td[data-r="'+r+'"][data-c="'+c+'"]');
 function paintSel(){
   $('body').querySelectorAll('td.sel,td.inrange').forEach(td=>td.classList.remove('sel','inrange'));
   const s=selRange();
@@ -2039,7 +2047,8 @@ function paintSel(){
   COLS.forEach((c,i)=>$('hrow').children[i+2].classList.toggle('hsel',fullCol&&s.c1<=i&&i<=s.c2));
   const row=VIEW[cur.r];
   const nsel=(s.r2-s.r1+1)*(s.c2-s.c1+1);
-  $('sCell').textContent=row?(COLS[cur.c].h+' · row '+(cur.r+1)+(row.style?' · '+row.style:'')+(nsel>1?'  ('+nsel+' cells)':'')):'—';
+  $('sCell').textContent=row?(COLS[cur.c].h+' · row '+(cur.r+1)+(row.style?' · '+row.style:'')+(nsel>1?'  ('+nsel+' cells)':''))
+    :onBlank()?COLS[cur.c].h+' · new row':'—';
   updateExpBtn();
 }
 /* exports are driven strictly by the row checkboxes */
@@ -2065,7 +2074,8 @@ function selRange(){
           c1:Math.max(0,Math.min(a.c,cur.c)),c2:Math.min(COLS.length-1,Math.max(a.c,cur.c))};
 }
 function moveTo(r,c,keep){
-  cur.r=Math.max(0,Math.min(VIEW.length-1,r));cur.c=Math.max(0,Math.min(COLS.length-1,c));
+  const last=onBlank()?VIEW.length:VIEW.length-1;   /* along the blank line, or up off it */
+  cur.r=Math.max(0,Math.min(last,r));cur.c=Math.max(0,Math.min(COLS.length-1,c));
   if(!keep)anchor={r:cur.r,c:cur.c};
   if(cur.r<winA+2||cur.r>winB-3){
     $('gw').scrollTop=Math.max(0,(cur.r-3)*rowH());
@@ -2082,25 +2092,33 @@ function selectCol(ci){anchor={r:0,c:ci};cur={r:VIEW.length-1,c:ci};paintSel();}
 function selectAll(){anchor={r:0,c:0};cur={r:VIEW.length-1,c:COLS.length-1};paintSel();}
 
 $('body').addEventListener('mousedown',e=>{
-  const td=e.target.closest('td');if(!td)return;
+  let td=e.target.closest('td');if(!td)return;
   /* a click INSIDE the open editor is caret placement, not a move to another
      cell — committing here is what forced the cursor back to the end and made
      the middle of the text unclickable */
   if(editing&&editEl&&(e.target===editEl||editEl.contains(e.target)))return;
   if(editing)commitEdit();
+  /* the first value on the blank line (this commit, or the picker's just before)
+     adds its row and draws the grid again, so the cell pressed may be gone: the
+     press goes to what is under the pointer now, the new row's cell on that line */
+  let tgt=e.target;
+  if(!td.isConnected){
+    tgt=document.elementFromPoint(e.clientX,e.clientY);
+    td=tgt&&tgt.closest('#body td');if(!td)return;
+  }
   if(td.classList.contains('fillc'))return;      /* right-hand margin: inert */
-  /* blank grid under the data — clicking turns the first blank line into a
-     real row and puts the cursor in the column clicked */
+  /* blank grid under the data — clicking puts the cursor on the first blank
+     line, in the column clicked; no row is added until a value lands there */
   if(td.parentElement.classList.contains('fillr')){
     const fc=td.dataset.fc;
-    if(fc!=null&&fc!=='')claimFiller(+fc);
+    if(fc!=null&&fc!=='')toBlank(+fc);
     return;
   }
   if(td.classList.contains('chk')){
     /* let the input's own change event do the work; clicking the cell
        around it just forwards to the input */
     const inp=td.querySelector('input');if(!inp)return;
-    if(e.target.tagName!=='INPUT'){e.preventDefault();inp.click();}
+    if(tgt.tagName!=='INPUT'){e.preventDefault();inp.click();}
     return;
   }
   if(td.classList.contains('num')){
@@ -2113,7 +2131,7 @@ $('body').addEventListener('mousedown',e=>{
     }
     selectRow(vi,e.shiftKey);return;
   }
-  if(e.target.classList.contains('thumb')||e.target.classList.contains('addimg'))return;
+  if(tgt.classList.contains('thumb')||tgt.classList.contains('addimg'))return;
   const r=+td.dataset.r,c=+td.dataset.c;
   if(e.shiftKey){
     if(!anchor)anchor={r:cur.r,c:cur.c};
@@ -2126,7 +2144,7 @@ $('body').addEventListener('mousedown',e=>{
   paintSel();
   const e2=cellEl(r,c);
   if(e2)e2.scrollIntoView({block:'nearest',inline:'nearest'});
-  if(e.target.classList.contains('caret')){setTimeout(beginEdit,0);return;}
+  if(tgt.classList.contains('caret')){setTimeout(beginEdit,0);return;}
   startDrag();
 });
 $('body').addEventListener('change',e=>{
@@ -2162,10 +2180,27 @@ function startDrag(){
   document.addEventListener('mouseup',up);
 }
 $('body').addEventListener('dblclick',e=>{
-  const td=e.target.closest('td');
+  let td=e.target.closest('td');
   if(!td||td.classList.contains('num'))return;
   if(e.target.classList.contains('thumb'))return;
   caretAt={x:e.clientX,t:Date.now()};
+  if(td.parentElement.classList.contains('fillr')){   /* the blank line */
+    if(td.dataset.fc==null||td.dataset.fc==='')return;
+    /* its editor still open (a dropdown whose list Escape closed, say) ends first,
+       as the redraw ends it on a row: opening another over it ended this one half
+       way, and the pick made next was lost. A value typed in it makes the row,
+       drawn where the line was, and the editor opens again on that row. */
+    if(editing){
+      commitEdit();
+      if(!td.isConnected){
+        const el=document.elementFromPoint(e.clientX,e.clientY);td=el&&el.closest('#body td[data-r]');
+        if(td){moveTo(+td.dataset.r,+td.dataset.c);beginEdit();}
+        return;
+      }
+    }
+    if(toBlank(+td.dataset.fc))beginEdit();
+    return;
+  }
   moveTo(+td.dataset.r,+td.dataset.c);beginEdit();
 });
 $('body').addEventListener('click',e=>{
@@ -2289,7 +2324,7 @@ function caretOffset(inp,clientX){
   }catch(e){return null;}
 }
 function beginEdit(seed){
-  const col=COLS[cur.c],row=VIEW[cur.r];
+  const col=COLS[cur.c],row=onBlank()?freshBlank():VIEW[cur.r];
   if(!row||col.t==='img')return;
   if(col.t==='scent'){
     if(ScentLink.show(row.style,row.category))ScentLink.pick(row.style,row.desc);
@@ -2342,10 +2377,10 @@ function beginEdit(seed){
 }
 function commitEdit(){
   if(!editing)return;
-  const col=COLS[cur.c],row=VIEW[cur.r],nv=editEl?editEl.value:editPrev;
+  const col=COLS[cur.c],row=onBlank()?blankRow:VIEW[cur.r],nv=editEl?editEl.value:editPrev;
   const vi=cur.r,ci=cur.c;
   editing=false;editEl=null;
-  const changed=String(nv)!==String(editPrev||'');
+  const changed=!!row&&String(nv)!==String(editPrev||'');
   if(changed)setCell(row,col.k,nv,true);
   patchCell(vi,ci);
   if(changed&&(col.k==='category'||col.k==='style'||col.k==='desc'))
@@ -2364,6 +2399,7 @@ function setCell(row,k,v,push){
   if(push){undoStack.push([{row:row,k:k,v:row[k]}]);redoStack=[];}
   row[k]=v;dirty.add(row._n+'|'+k);queueSave(row);
   if(k==='style')scentSync([row]);
+  if(row._blank)takeBlank(row);   /* a value on the blank line adds that row */
 }
 /* ScentLink onChange — fires only when scent data really changed (first load,
    a save in the picker, or a refresh when the tab regains focus). Never
@@ -2383,12 +2419,15 @@ function onScentChange(){
   }else renderWindow(1);
 }
 function setCells(changes){
-  changes=changes.filter(c=>c.k!=='scent');
+  /* nothing new landing on the blank line (the same, or an empty cell) must not
+     add a row */
+  changes=changes.filter(c=>c.k!=='scent'&&!(c.row._blank&&(String(c.v||'')===''||String(c.v||'')===String(c.row[c.k]||''))));
   if(!changes.length)return;
   undoStack.push(changes.map(c=>({row:c.row,k:c.k,v:c.row[c.k]})));redoStack=[];
   const rows=new Set();
   changes.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
   if(changes.some(c=>c.k==='style'))scentSync([...rows]);
+  rows.forEach(r=>{if(r._blank)takeBlank(r);});
   rows.forEach(r=>saveQ.add(r));queueSave(null);
   renderWindow(1);updateSide();
   if(changes.some(c=>c.k==='stage'))setTimeout(()=>applyDoneRule([...rows]),0);
@@ -2406,7 +2445,14 @@ function fillDown(){
   if(LOCAL){toast('Demo mode is read-only');return;}
   const s=selRange();
   const ch=[];
-  if(s.r2===s.r1){                       /* single row → copy the row above */
+  if(onBlank()){                         /* blank line → a new row copying the last one */
+    const nb=freshBlank(),src=VIEW[VIEW.length-1];
+    for(let c=s.c1;c<=s.c2;c++){
+      const k=COLS[c].k;
+      if(READONLY_T(COLS[c].t)||String(src[k]||'')===String(nb[k]||''))continue;
+      ch.push({row:nb,k:k,v:src[k]});
+    }
+  }else if(s.r2===s.r1){                 /* single row → copy the row above */
     if(s.r1===0){toast('Nothing above to fill from');return;}
     for(let c=s.c1;c<=s.c2;c++){
       if(READONLY_T(COLS[c].t))continue;
@@ -2424,6 +2470,7 @@ function fillDown(){
 }
 function copySel(){
   const s=selRange(),lines=[];
+  if(s.r1>s.r2)return;                   /* the blank line: nothing to copy */
   for(let r=s.r1;r<=s.r2;r++){
     const cells=[];
     for(let c=s.c1;c<=s.c2;c++){
@@ -2469,14 +2516,16 @@ document.addEventListener('paste',e=>{
   const r0=tile?sel.r1:cur.r, c0=tile?sel.c1:cur.c;
   const rows=tile?selH:gh, cols=tile?selW:gw;
   const ch=[];
+  const nb=onBlank()?freshBlank():null;  /* pasting on the blank line fills a new row */
   for(let dr=0;dr<rows;dr++)for(let dc=0;dc<cols;dc++){
     const r=r0+dr,c=c0+dc;
-    if(r>=VIEW.length||c>=COLS.length)continue;
+    const row=r===VIEW.length?nb:VIEW[r];
+    if(!row||c>=COLS.length)continue;
     const col=COLS[c];if(READONLY_T(col.t))continue;
     const line=grid[dr%gh]||[];
     const val=line[dc%Math.max(line.length,1)];
     if(val===undefined)continue;
-    ch.push({row:VIEW[r],k:col.k,v:col.t==='date'?toISO(val):val});
+    ch.push({row:row,k:col.k,v:col.t==='date'?toISO(val):val});
   }
   setCells(ch);
   toast(tile?'Pasted into '+selH+'×'+selW+' cells'
@@ -2508,10 +2557,16 @@ function syncBtns(){
 }
 
 /* ═══════════════════ ROWS ═══════════════════ */
-function appendRow(){
+/* a new, empty row. Its Date Created is today's date as a default (_date0),
+   which on its own is not a value: rowHasContent() ignores it. */
+function blankObj(){
   const o={_id:null,_n:ROWS.reduce((m,r)=>Math.max(m,r._n),0)+1};
   COLS.forEach(c=>o[c.k]='');
-  o.date=new Date().toISOString().slice(0,10);
+  o.date=o._date0=new Date().toISOString().slice(0,10);
+  return o;
+}
+function appendRow(){
+  const o=blankObj();
   ROWS.push(o);
   applyView();
   return o;
@@ -2523,17 +2578,31 @@ $('addRow').onclick=()=>{
   $('gw').scrollTop=$('gw').scrollHeight;
   toast('Row added at the bottom — saves once you enter a value');
 };
-/* Excel-style: click a cell in the blank grid under the data and it becomes a
-   real row, cursor landing in the column you clicked. The row stays unsaved
-   until a field has a value, so a stray click costs nothing. */
-function claimFiller(ci){
+/* Excel-style blank line: clicking the blank grid under the data only puts the
+   cursor on its first line (cur.r===VIEW.length), in the column clicked. An
+   edit, paste or Ctrl+D there works on blankRow, a row that is NOT in ROWS and
+   is marked _blank; the first real value setCell / setCells puts on it is what
+   adds it (takeBlank: that row, whichever edit gave it the value). Leave
+   without a value and there is nothing to undo, drop or save. While the picker
+   is open on the blank line, another edit there goes into the picker's row, so
+   one line is one new row. */
+let blankRow=null;
+const onBlank=()=>VIEW.length>0&&cur.r===VIEW.length;
+const freshBlank=()=>(blankRow&&mpRow===blankRow?blankRow:(blankRow=Object.assign(blankObj(),{_blank:1})));
+function toBlank(ci){
   if(LOCAL){toast('Demo mode is read-only');return false;}
-  appendRow();
-  const r=VIEW.length-1;
-  if(r<0)return false;
-  moveTo(r,ci);
-  renderWindow(1);
+  cur={r:VIEW.length,c:ci};anchor=null;
+  paintSel();
+  const e=cellEl(cur.r,cur.c);if(e)e.scrollIntoView({block:'nearest',inline:'nearest'});
   return true;
+}
+function takeBlank(o){
+  delete o._blank;if(blankRow===o)blankRow=null;
+  /* it lands where it was typed and the cursor stays on it; like any edit, the
+     next applyView sorts or filters it */
+  ROWS.push(o);VIEW.push(o);
+  $('sShown').textContent=VIEW.length;$('sTotal').textContent=ROWS.length;
+  updateSide();renderWindow(1);
 }
 $('delRow').onclick=()=>{
   if(LOCAL){toast('Demo mode is read-only');return;}
@@ -2659,7 +2728,12 @@ async function retireLookup(k,item,flag){
 /* ═══════════════════ AUTOSAVE ═══════════════════ */
 let saveQ=new Set(),saveTimer=null,saving=false,saveErr=null;
 const AUTOSAVE_MS=1100;
-function rowHasContent(r){return COLS.some(c=>!READONLY_T(c.t)&&String(r[c.k]||'').trim()!=='');}
+/* a new row's default Date Created (_date0) is not a value */
+function rowHasContent(r){return COLS.some(c=>!READONLY_T(c.t)&&(c.k==='date'
+  ?!!r.date&&r.date!==r._date0:String(r[c.k]||'').trim()!==''));}
+/* a saved row's changes are no longer pending: every field it saves, Archived
+   too (not a grid column), so an Archive no longer leaves "Pending…" up */
+const undirty=row=>{for(const k in FIELD)dirty.delete(row._n+'|'+k);COLS.forEach(c=>dirty.delete(row._n+'|'+c.k));};
 function queueSave(row){
   if(LOCAL)return;
   if(row)saveQ.add(row);
@@ -2688,14 +2762,14 @@ async function flushSave(){
     await resolveList();
     const base='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+listId+'/items';
     for(const row of batch){
-      if(!row._id&&!rowHasContent(row)){saveQ.delete(row);continue;}
+      if(!row._id&&!rowHasContent(row)){saveQ.delete(row);undirty(row);continue;}
       const f={};
       for(const k in FIELD)f[FIELD[k]]=k==='date'
         ?(row.date?new Date(row.date+'T12:00:00Z').toISOString():null):(row[k]||"");
       if(row._id)await graph(base+'/'+row._id+'/fields',{method:'PATCH',body:JSON.stringify(f)});
       else{const res=await graph(base,{method:'POST',body:JSON.stringify({fields:f})});row._id=res.id;}
       saveQ.delete(row);
-      COLS.forEach(c=>dirty.delete(row._n+'|'+c.k));
+      undirty(row);
     }
     for(const id of dels){
       await graph(base+'/'+id,{method:'DELETE'});
