@@ -1398,7 +1398,7 @@ const imgWanted=new Set();     /* keys already requested, hit or miss */
 let imgQueue=[],imgRunning=0,imgRepaint=null;
 function scheduleRepaint(){
   if(imgRepaint)return;
-  imgRepaint=setTimeout(()=>{imgRepaint=null;renderWindow(1);},120);
+  imgRepaint=setTimeout(()=>{imgRepaint=null;redrawWhenIdle();},120);
 }
 async function fetchThumbChunk(keys){
   const reqs=keys.map((k,i)=>({id:String(i+1),method:'GET',
@@ -1493,7 +1493,7 @@ function ensureFullMap(){
 function refreshImages(){
   if(LOCAL||imgRefreshing)return imgRefreshing;
   imgWanted.clear();
-  imgRefreshing=loadImgMap().then(()=>{imgRefreshing=null;renderWindow(1);});
+  imgRefreshing=loadImgMap().then(()=>{imgRefreshing=null;redrawWhenIdle();});
   return imgRefreshing;
 }
 /* null = not fetched yet. Only demo mode falls back to the bundled folder;
@@ -1551,7 +1551,7 @@ async function load(quiet){
       /* Photos start only AFTER the rows are in. Kicking them off first made
          image requests compete with the list pages for the same throttling
          budget, so the thing the user was actually waiting for went last. */
-      loadImgMap().then(()=>renderWindow(1));
+      loadImgMap().then(()=>redrawWhenIdle());
     }
   }catch(e){
     hideLoad();
@@ -2041,6 +2041,17 @@ $('gw').addEventListener('scroll',()=>{
   renderWindow(0);
 },{passive:true});
 addEventListener('resize',()=>renderWindow(1));
+/* a redraw nobody is waiting on (a save done, photos arrived) never runs under
+   an open cell editor or picker. It rebuilt the grid and destroyed the editor:
+   its blur kept what was typed so far and the next key started a fresh
+   type-over edit that replaced it, so a save landing mid-typing lost the start
+   of the value. It waits until the editor is closed. */
+let redrawRetry=null;
+function redrawWhenIdle(){
+  clearTimeout(redrawRetry);redrawRetry=null;
+  if(editing||$('mpick').classList.contains('open')){redrawRetry=setTimeout(redrawWhenIdle,400);return;}
+  renderWindow(1);
+}
 
 /* patch a single cell without rebuilding the table */
 function patchCell(vi,ci){
@@ -2817,7 +2828,7 @@ async function flushSave(){
       deleted=deleted.filter(x=>x!==id);
     }
     saving=false;
-    renderWindow(1);
+    redrawWhenIdle();   /* clears the saved cells' pending marks */
     if(saveQ.size||deleted.length)queueSave(null);else saveStatus();
   }catch(e){
     saving=false;saveErr=e.message;saveStatus();
