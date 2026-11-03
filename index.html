@@ -152,7 +152,11 @@
   EDITING: clicking inside an already-open cell editor places the caret where
   you clicked. Double-clicking a cell opens it with the caret under the pointer
   rather than at the end (caretOffset() measures the cell's own font on a
-  canvas). Typing straight into a cell still replaces the contents.
+  canvas). Typing straight into a cell still replaces the contents. An open
+  editor stays open through the scroll that brings its cell into view, a
+  sideways scroll while it sits in a frozen column, and a resize; on a phone the
+  browser does all three as you type (the frozen columns are wider than the
+  screen), and closing the editor there kept only the last key.
 
   TEMPLATE EXPORTS: "PPS Sheet" and "Quote Sheet" reproduce the two circulated
   workbooks — row heights (130.5pt / 119.25pt), Calibri 11 / 12, thin borders on
@@ -2038,20 +2042,42 @@ function renderWindow(force){
     }
   }
 }
+/* where the grid was scrolled when the open editor opened, and whether it sits
+   in a frozen column (beginEdit) */
+let edAt=null;
+const gwAt=frozen=>({l:$('gw').scrollLeft,t:$('gw').scrollTop,frozen:frozen});
+/* the editor stays open through the scroll that brought its cell into view as
+   it opened, and through any sideways scroll while it sits in a frozen column,
+   which moves neither it nor the rows drawn. On a phone the browser scrolls the
+   grid sideways as each key is typed, trying to bring Style or Description into
+   view, and closing the editor there kept one key: "QT-MP" saved "P". */
+function edStays(){
+  const g=$('gw');
+  return !!edAt&&g.scrollTop===edAt.t&&(edAt.frozen||g.scrollLeft===edAt.l);
+}
 $('gw').addEventListener('scroll',()=>{
   /* re-rendering under an open editor destroys its DOM node and leaves a white
      hole — close it first, then repaint */
   if($('mpick').classList.contains('open'))commitMulti();
-  if(editing)commitEdit();
+  if(editing&&!edStays())commitEdit();
   if($('fmenu').classList.contains('open'))$('fmenu').classList.remove('open');
   renderWindow(0);
 },{passive:true});
-addEventListener('resize',()=>renderWindow(1));
-/* a redraw nobody is waiting on (a save done, photos arrived) never runs under
-   an open cell editor or picker. It rebuilt the grid and destroyed the editor:
-   its blur kept what was typed so far and the next key started a fresh
-   type-over edit that replaced it, so a save landing mid-typing lost the start
-   of the value. It waits until the editor is closed. */
+/* a resize (a phone's keyboard coming up, say) leaves an open editor open: its
+   cell is brought back into view, as when it opened, and the grid redraws once
+   the editor is closed */
+addEventListener('resize',()=>{
+  if(editing&&editEl&&editEl.isConnected){
+    editEl.parentNode.scrollIntoView({block:'nearest',inline:'nearest'});
+    edAt=gwAt(!!edAt&&edAt.frozen);
+  }
+  redrawWhenIdle();
+});
+/* a redraw nobody is waiting on (a save done, photos arrived, a resize) never
+   runs under an open cell editor or picker. It rebuilt the grid and destroyed
+   the editor: its blur kept what was typed so far and the next key started a
+   fresh type-over edit that replaced it, so a save landing mid-typing lost the
+   start of the value. It waits until the editor is closed. */
 let redrawRetry=null;
 function redrawWhenIdle(){
   clearTimeout(redrawRetry);redrawRetry=null;
@@ -2370,8 +2396,19 @@ function beginEdit(seed){
     return;
   }
   if(LOCAL){toast('Demo mode is read-only');return;}
-  const td=cellEl(cur.r,cur.c);if(!td)return;
+  let td=cellEl(cur.r,cur.c);if(!td)return;
   if(col.multi){openMulti(row,col.k,td);return;}
+  /* the cell comes into view BEFORE the editor opens (and the rows it brings in
+     are drawn now, not under the editor), and the editor's focus never scrolls
+     the grid. That focus used to scroll the grid to the cell, the grid's scroll
+     handler closed the editor at once, and every key after it started a fresh
+     type-over edit: typing "abc" into a cell scrolled out of view saved "c". On
+     a phone it was every Style and Description cell — the frozen columns are
+     wider than the screen, so those two sit past the grid's right edge and no
+     scroll brings them into view (edStays). */
+  td.scrollIntoView({block:'nearest',inline:'nearest'});
+  renderWindow(0);td=cellEl(cur.r,cur.c);if(!td)return;
+  edAt=gwAt(td.classList.contains('stk'));
   editing=true;editPrev=row[col.k]||'';
   if(col.t==='sel'){
     const s=document.createElement('select');s.className='cellin';
@@ -2379,7 +2416,7 @@ function beginEdit(seed){
     if(editPrev&&opts.indexOf(editPrev)<0)opts.push(editPrev);
     s.innerHTML=opts.map(o=>'<option value="'+esc(o)+'"'+(o===editPrev?' selected':'')+'>'+esc(o||'—')+'</option>').join('')
       +'<option value="__ADD__">＋ Add new…</option>';
-    td.innerHTML='';td.appendChild(s);s.focus();
+    td.innerHTML='';td.appendChild(s);s.focus({preventScroll:true});
     if(s.showPicker)try{s.showPicker();}catch(x){}
     s.onchange=()=>{
       if(s.value==='__ADD__'){
@@ -2400,7 +2437,7 @@ function beginEdit(seed){
   if(col.t==='date'){inp.type='date';inp.value=toISO(editPrev);}
   else inp.value=seed!==undefined?seed:editPrev;
   td.innerHTML='';td.appendChild(inp);
-  inp.focus();
+  inp.focus({preventScroll:true});
   /* Excel behaviour: opening an edit by clicking puts the caret under the
      pointer; opening it any other way puts it at the end. caretAt is stamped
      by the double-click handler. */
