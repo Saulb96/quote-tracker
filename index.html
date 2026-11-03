@@ -103,7 +103,12 @@
   selection otherwise — the old code always used the selection, which is why
   ticking five rows deleted only one. A row deleted while its save is under way
   is deleted once its create comes back (it used to be created all the same and
-  return on the next load), and Undo/Redo forget it.
+  return on the next load), and Undo/Redo forget it. A delete SharePoint
+  refuses (403, or any other error it answers with) brings the row back to the
+  grid as SharePoint has it, with a message ("HK400 was not deleted: SharePoint
+  does not let this account delete items"), as Undo's does. It used to leave
+  the row gone from the grid, the item still in the list, and "Save failed" for
+  good. With no answer at all (no network) the delete waits for the retry.
 
   UNDO right after making items — typed or picked on the blank line or after
   "+ Row", a paste of several lines there, Ctrl+D there — deletes them after
@@ -1566,7 +1571,7 @@ async function load(quiet){
      (a Reload only gets here with nothing waiting, or after "Reload anyway?").
      A Redo after it, or the next autosave, sent those rows' old fields over
      whatever others had saved since, or made an item Reload had dropped. */
-  ROWS=[];dirty.clear();saveQ.clear();deleted=[];undoDel.clear();undoStack=[];redoStack=[];syncBtns();
+  ROWS=[];dirty.clear();saveQ.clear();deleted=[];undoDel.clear();rowDel.clear();undoStack=[];redoStack=[];syncBtns();
   imgQueue=[];imgWanted.clear();bulkDone=false;
   $('body').innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:var(--muted)">Loading…</td></tr>';
   try{
@@ -2688,7 +2693,7 @@ function doUndo(){
    blank their fields, which saved them as empty items, one per line of a
    paste. An item changed since it was made (by anything Undo has not taken
    back) stays as it is, and the question says so; one someone else has changed
-   is caught as it is deleted (undoDelete) and stays too. Cancel leaves it all,
+   is caught as it is deleted (deleteItem) and stays too. Cancel leaves it all,
    and the step is still next for Undo. A deleted item is not brought back by
    Redo. */
 const styleList=rows=>rows.slice(0,3).map(r=>r.style||'An item with no Style').join(', ')+(rows.length>3?' and '+(rows.length-3)+' more':'');
@@ -2792,12 +2797,13 @@ $('delRow').onclick=()=>{
    _gone, so flushSave writes it no more and deletes the item its create makes;
    one deleted while its create was in flight used to be created all the same
    and came back on the next load. Undo and Redo forget the rows, so neither can
-   save to an item that is gone. */
+   save to an item that is gone. undoDel and rowDel keep each row until its
+   delete has gone, so a refused one can come back (deleteItem). */
 function dropRows(gone,byUndo){
   const g=new Set(gone);
   gone.forEach(r=>{
     picked.delete(r);saveQ.delete(r);undirty(r);r._gone=byUndo?'undo':'row';
-    if(r._id){deleted.push(r._id);if(byUndo)undoDel.set(r._id,r);}
+    if(r._id){deleted.push(r._id);(byUndo?undoDel:rowDel).set(r._id,r);}
   });
   ROWS=ROWS.filter(x=>!g.has(x));
   const forget=st=>{
@@ -2929,7 +2935,8 @@ async function retireLookup(k,item,flag){
 
 /* ═══════════════════ AUTOSAVE ═══════════════════ */
 let saveQ=new Set(),saveTimer=null,saving=false,saveErr=null;
-const undoDel=new Map();   /* the ids in deleted that Undo deleted, to their rows (undoDelete) */
+const undoDel=new Map();   /* the ids in deleted that Undo deleted, to their rows (deleteItem) */
+const rowDel=new Map();    /* and those Delete row deleted */
 const AUTOSAVE_MS=1100;
 /* a new row's default Date Created (_date0) is not a value */
 function rowHasContent(r){return COLS.some(c=>!READONLY_T(c.t)&&(c.k==='date'
@@ -3053,7 +3060,7 @@ async function flushSave(){
         const f={};for(const k in FIELD)f[FIELD[k]]=wireVal(k,snap[k]);
         const res=await graph(base,{method:'POST',body:JSON.stringify({fields:f})});
         row._id=res.id;row._etag=res&&res['@odata.etag']||null;row._base=snap;
-        if(row._gone){deleted.push(row._id);if(row._gone==='undo')undoDel.set(row._id,row);}   /* deleted while it was being created */
+        if(row._gone){deleted.push(row._id);(row._gone==='undo'?undoDel:rowDel).set(row._id,row);}   /* deleted while it was being created */
       }else{
         const r=await patchRow(base,row,snap);
         if(r.took.length){others=true;if(r.took.indexOf('style')>=0)scentSync([row]);}
@@ -3064,12 +3071,14 @@ async function flushSave(){
          never sent, and the page still said "All changes saved". */
       if(Object.keys(FIELD).every(k=>sameVal(k,row[k],row._base[k]))){saveQ.delete(row);undirty(row);}
     }
+    const kept={};   /* the rows deleteItem brought back, by why */
     for(const id of dels){
-      const mine=undoDel.get(id);
-      if(mine)await undoDelete(base,id,mine);
-      else await graph(base+'/'+id,{method:'DELETE'});
-      deleted=deleted.filter(x=>x!==id);undoDel.delete(id);
+      const mine=undoDel.get(id),row=mine||rowDel.get(id);
+      const why=row?await deleteItem(base,id,row,!!mine):(await graph(base+'/'+id,{method:'DELETE'}),'');
+      if(why)(kept[why]=kept[why]||[]).push(row);
+      deleted=deleted.filter(x=>x!==id);undoDel.delete(id);rowDel.delete(id);
     }
+    for(const why in kept)said.push(keptNote(why,kept[why]));
     saving=false;
     redrawWhenIdle();   /* clears the saved cells' pending marks */
     if(saveQ.size||deleted.length)queueSave(null);else saveStatus();
@@ -3081,34 +3090,42 @@ async function flushSave(){
   if(said.length)toast(said.join(' · '),said.length>1?8000:6000);
   syncBtns();
 }
-/* An item Undo deletes goes only if nobody else has changed it since this page
-   last saved it. The DELETE carries that save's ETag, so SharePoint refuses it
-   (412) once the item has changed. SharePoint can move an ETag by itself, so a
-   refusal is checked against the item as it is now: just what this page last
-   sent, and nobody else changed it, so it goes; anything else, and it comes
-   back to the grid as SharePoint has it, and the page says so. Without an ETag
-   from the last save the delete goes as Delete row's does. A change someone
-   else made before this page's last save of the item is in the row by then (a
-   save sends only this page's fields and takes the rest from SharePoint's
-   answer, or from the item read back on a 412), so the row no longer holds what
-   it was made with: Undo's question names it and it stays (undoMade). One made
-   since that save is caught here. Saves used to send the whole row, which
-   overwrote such a change unseen, and the item was deleted as if untouched.
-   An account SharePoint lets add items but not delete them (403) gets the item
-   back in the grid the same way, rather than a row gone from the grid while
-   the item stays in the list and "Save failed" for good. */
-async function undoDelete(base,id,row){
-  let denied=false;
-  try{await graph(base+'/'+id,{method:'DELETE',headers:row._etag?{'if-match':row._etag}:{}});return;}
+/* An item leaves SharePoint here: for Delete row (guard false, no If-Match) and
+   for Undo of items just made (guard true). Returns '' once it is gone, or why
+   it is back in the grid. An item Undo deletes goes only if nobody else has
+   changed it since this page last saved it. The DELETE carries that save's
+   ETag, so SharePoint refuses it (412) once the item has changed. SharePoint
+   can move an ETag by itself, so a refusal is checked against the item as it
+   is now: just what this page last sent, and nobody else changed it, so it
+   goes; anything else, and it comes back to the grid as SharePoint has it, and
+   the page says so. Without an ETag from the last save the delete goes as
+   Delete row's does. A change someone else made before this page's last save
+   of the item is in the row by then (a save sends only this page's fields and
+   takes the rest from SharePoint's answer, or from the item read back on a
+   412), so the row no longer holds what it was made with: Undo's question
+   names it and it stays (undoMade). One made since that save is caught here.
+   Saves used to send the whole row, which overwrote such a change unseen, and
+   the item was deleted as if untouched.
+   Either delete, refused by SharePoint (403: an account it lets add items but
+   not delete them; or any other error it answers with), brings the item back
+   to the grid the same way, with a message. Delete row's used to leave the row
+   gone from the grid, the item still in the list, and "Save failed" for good.
+   With no answer at all (no network, say) the delete stays waiting and "Save
+   failed" offers the retry, since whether it went is not known. */
+async function deleteItem(base,id,row,guard){
+  let why;
+  try{await graph(base+'/'+id,{method:'DELETE',headers:guard&&row._etag?{'if-match':row._etag}:{}});return '';}
   catch(e){
-    if(/^404\b/.test(e.message))return;   /* gone already */
-    denied=/^403\b/.test(e.message);
-    if(!denied&&!/^412\b/.test(e.message))throw e;
+    if(/^404\b/.test(e.message))return '';   /* gone already */
+    if(!/^\d{3}\b/.test(e.message))throw e;
+    why=/^403\b/.test(e.message)?'denied':guard&&/^412\b/.test(e.message)?'changed':'error '+e.message.slice(0,3);
   }
-  const it=await graph(base+'/'+id+'?$expand=fields($select='+Object.values(FIELD).join(',')+')');
+  let it;
+  try{it=await graph(base+'/'+id+'?$expand=fields($select='+Object.values(FIELD).join(',')+')');}
+  catch(e){if(/^404\b/.test(e.message))return '';throw e;}
   const now=spFields(it.fields||{});
-  if(!denied&&row._base&&Object.keys(FIELD).every(k=>sameVal(k,now[k],row._base[k]))){
-    await graph(base+'/'+id,{method:'DELETE'});return;}
+  if(why==='changed'&&row._base&&Object.keys(FIELD).every(k=>sameVal(k,now[k],row._base[k])))
+    return deleteItem(base,id,row,false);
   Object.assign(row,now);delete row._gone;row._etag=it['@odata.etag']||null;row._base=now;
   scentSync([row]);ROWS.push(row);
   /* into the view once no editor is open, the cursor on the row it was on */
@@ -3118,8 +3135,15 @@ async function undoDelete(base,id,row){
     if(at&&VIEW.indexOf(at)>=0){cur.r=VIEW.indexOf(at);paintSel();}
   };
   back();
-  toast(denied?(row.style||'An item')+' was not deleted: SharePoint does not let this account delete items'
-    :(row.style||'An item')+' was changed by someone else after it was added, so it was not deleted',6000);
+  return why;
+}
+/* one message for the items a save brought back for the same reason:
+   "HK400 was not deleted: SharePoint does not let this account delete items" */
+function keptNote(why,rows){
+  const one=rows.length===1,who=one?(rows[0].style||'An item'):styleList(rows),was=one?' was':' were';
+  if(why==='changed')return who+was+' changed by someone else after '+(one?'it was':'they were')+' added, so '+(one?'it was':'they were')+' not deleted';
+  if(why==='denied')return who+was+' not deleted: SharePoint does not let this account delete items';
+  return who+was+' not deleted: SharePoint could not delete '+(one?'it':'them')+' ('+why+')';
 }
 
 /* ═══════════════════ IMAGES ═══════════════════ */
