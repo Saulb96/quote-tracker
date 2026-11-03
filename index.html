@@ -105,7 +105,10 @@
   PASTE fills a selection Excel-style: a copied block smaller than the selected
   range tiles to fill it, so one cell pasted over 40 selected rows lands in all
   40. A block matching or exceeding the selection pastes from the cursor at its
-  own size.
+  own size. On the blank line under the last row every line pasted is a new row
+  of its own, in order, and a line with nothing in it makes none (it used to
+  keep only the first line). Pasted from a row above, lines that run past the
+  last row are left out, and the message says how many of them landed.
 
   AUTO-REFRESH reloads from SharePoint every 60 minutes, preserving scroll
   position, cursor and ticked rows. It skips the tick entirely when a save is
@@ -2431,7 +2434,7 @@ function setCells(changes){
   /* nothing new landing on the blank line (the same, or an empty cell) must not
      add a row */
   changes=changes.filter(c=>c.k!=='scent'&&!(c.row._blank&&(String(c.v||'')===''||String(c.v||'')===String(c.row[c.k]||''))));
-  if(!changes.length)return;
+  if(!changes.length)return changes;
   undoStack.push(changes.map(c=>({row:c.row,k:c.k,v:c.row[c.k]})));redoStack=[];
   const rows=new Set();
   changes.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
@@ -2440,6 +2443,7 @@ function setCells(changes){
   rows.forEach(r=>saveQ.add(r));queueSave(null);
   renderWindow(1);updateSide();
   if(changes.some(c=>c.k==='stage'))setTimeout(()=>applyDoneRule([...rows]),0);
+  return changes;   /* what was set, for the paste message */
 }
 function clearSel(){
   if(LOCAL){toast('Demo mode is read-only');return;}
@@ -2526,20 +2530,31 @@ document.addEventListener('paste',e=>{
   const r0=tile?sel.r1:cur.r, c0=tile?sel.c1:cur.c;
   const rows=tile?selH:gh, cols=tile?selW:gw;
   const ch=[];
-  const nb=onBlank()?freshBlank():null;  /* pasting on the blank line fills a new row */
+  /* pasting on the blank line fills a new row, and each further line a new row
+     of its own, in order; a line with nothing in it makes none. It used to fill
+     the first line's row and drop the rest. */
+  const nb=onBlank()?freshBlank():null,more=[];
+  const newRow=dr=>{
+    if(!dr)return nb;
+    if(!more[dr]){more[dr]=Object.assign(blankObj(),{_blank:1});more[dr]._n+=dr;}   /* not in ROWS yet: keep _n apart */
+    return more[dr];
+  };
+  /* pasted from a row above, the lines past the last row are left out */
+  const lost=nb?0:Math.max(0,r0+rows-VIEW.length);
   for(let dr=0;dr<rows;dr++)for(let dc=0;dc<cols;dc++){
     const r=r0+dr,c=c0+dc;
-    const row=r===VIEW.length?nb:VIEW[r];
+    const line=grid[dr%gh]||[];
+    const row=r<VIEW.length?VIEW[r]:nb&&line.some(v=>v.trim())?newRow(r-VIEW.length):null;
     if(!row||c>=COLS.length)continue;
     const col=COLS[c];if(READONLY_T(col.t))continue;
-    const line=grid[dr%gh]||[];
     const val=line[dc%Math.max(line.length,1)];
     if(val===undefined)continue;
     ch.push({row:row,k:col.k,v:col.t==='date'?toISO(val):val});
   }
-  setCells(ch);
+  const n=new Set(setCells(ch).map(c=>c.row)).size;   /* the rows it really landed on */
   toast(tile?'Pasted into '+selH+'×'+selW+' cells'
-            :'Pasted '+gh+' row'+(gh>1?'s':''));
+            :!n?'Nothing pasted'
+            :'Pasted '+n+(lost?' of '+rows:'')+' row'+(n>1||lost?'s':''));
 });
 function doUndo(){
   const step=undoStack.pop();if(!step)return;
