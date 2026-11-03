@@ -1167,6 +1167,11 @@ function toast(m,ms){const t=$('toast');t.textContent=m;t.classList.add('on');
 function fmtDate(v){if(!v)return"";const d=new Date(v);if(isNaN(d))return String(v);
   return (d.getUTCMonth()+1)+'/'+d.getUTCDate()+'/'+d.getUTCFullYear();}
 function toISO(s){if(!s)return"";const d=new Date(s);return isNaN(d)?"":d.toISOString().slice(0,10);}
+/* today as yyyy-mm-dd in the browser's own time zone. It used to be
+   toISOString(), the UTC date: in New York that is tomorrow from 7 PM (8 PM in
+   summer), so a quote added in the evening was dated the next day. */
+function todayISO(){const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){}}
 
 /* ═══════════════════ BACKGROUND ═══════════════════ */
@@ -2587,7 +2592,7 @@ function syncBtns(){
 function blankObj(){
   const o={_id:null,_n:ROWS.reduce((m,r)=>Math.max(m,r._n),0)+1};
   COLS.forEach(c=>o[c.k]='');
-  o.date=o._date0=new Date().toISOString().slice(0,10);
+  o.date=o._date0=todayISO();
   return o;
 }
 /* "+ Row" is the blank line under the last row in view, in Style: what is
@@ -2881,7 +2886,7 @@ function buildNq(){
     if(col.t==='sel')
       inner='<select id="nq_'+k+'"><option value=""></option>'+(CHOICES[k]||[]).map(o=>'<option>'+esc(o)+'</option>').join('')+'</select>';
     else if(col.t==='date')
-      inner='<input type="date" id="nq_'+k+'" value="'+new Date().toISOString().slice(0,10)+'">';
+      inner='<input type="date" id="nq_'+k+'" value="'+todayISO()+'">';
     else if(k==='note')inner='<textarea id="nq_'+k+'"></textarea>';
     else inner='<input id="nq_'+k+'" autocomplete="off">';
     d.innerHTML='<label>'+esc(col.h)+(k==='style'?' *':'')+'</label>'+inner;
