@@ -80,8 +80,12 @@
   (CSS position:sticky on thead). Column geometry comes from the <colgroup>,
   never from cell content, so scrolling cannot resize a column. The grid opens
   scrolled to the bottom, where new quotes land; ⤒ / ⤓ jump to either end. No
-  Save button — autosaves ~1s after typing stops. "+ Row" appends at the bottom
-  and only writes once a field has a value.
+  Save button — autosaves ~1s after typing stops. "+ Row" puts the cursor on
+  that first blank line, in Style, whatever the search, filter or sort, so what
+  is typed there is a new row and it only writes once a field has a value. With
+  no rows in view the blank lines sit under "No rows match". "+ Row" used to
+  append a row that a search or filter hid and a sort moved, leaving the cursor
+  on the last row in view: typing overwrote that existing row.
 
   FILTER PANE covers every dropdown column (Action, Stage, Brand, Category,
   Customer, Season, Sensitive). Each group collapses by clicking its header;
@@ -1981,7 +1985,12 @@ function renderWindow(force){
   winA=a;winB=b;
   const body=$('body'),f=document.createDocumentFragment();
   if(!n){
+    /* the blank grid under the message too, so "+ Row" (or a click there) can
+       start a new row when the search or filters show nothing */
     body.innerHTML='<tr><td colspan="'+(COLS.length+3)+'" style="padding:36px;text-align:center;color:var(--muted)">No rows match the current filters.</td></tr>';
+    for(let i=0;i<FILL_ROWS;i++)body.appendChild(fillerRow());
+    stickyOffsets();
+    if($('hrow').children.length)paintSel();   /* no header yet before sign-in (a resize there) */
     return;
   }
   const sp=document.createElement('tr');sp.className='spacer';
@@ -2446,6 +2455,7 @@ function fillDown(){
   const s=selRange();
   const ch=[];
   if(onBlank()){                         /* blank line → a new row copying the last one */
+    if(!VIEW.length){toast('Nothing above to fill from');return;}
     const nb=freshBlank(),src=VIEW[VIEW.length-1];
     for(let c=s.c1;c<=s.c2;c++){
       const k=COLS[c].k;
@@ -2565,18 +2575,17 @@ function blankObj(){
   o.date=o._date0=new Date().toISOString().slice(0,10);
   return o;
 }
-function appendRow(){
-  const o=blankObj();
-  ROWS.push(o);
-  applyView();
-  return o;
-}
+/* "+ Row" is the blank line under the last row in view, in Style: what is
+   typed there is a new row, whatever the search, filter or sort. It used to
+   append an empty row to ROWS and put the cursor on the last row in VIEW, but
+   a search or filter left the new row out of VIEW and a sort moved it, so that
+   last row was an existing one and typing overwrote it. */
 $('addRow').onclick=()=>{
   if(LOCAL){toast('Demo mode is read-only');return;}
-  appendRow();
-  moveTo(VIEW.length-1,2);
-  $('gw').scrollTop=$('gw').scrollHeight;
-  toast('Row added at the bottom — saves once you enter a value');
+  const gw=$('gw');
+  gw.scrollTop=gw.scrollHeight;renderWindow(1);   /* the blank line is drawn only with the last row */
+  toBlank(2);
+  toast('New row at the bottom — saves once you enter a value');
 };
 /* Excel-style blank line: clicking the blank grid under the data only puts the
    cursor on its first line (cur.r===VIEW.length), in the column clicked. An
@@ -2587,7 +2596,9 @@ $('addRow').onclick=()=>{
    is open on the blank line, another edit there goes into the picker's row, so
    one line is one new row. */
 let blankRow=null;
-const onBlank=()=>VIEW.length>0&&cur.r===VIEW.length;
+/* with no rows in view it is the line drawn under "No rows match" (not there
+   while the grid loads) */
+const onBlank=()=>cur.r===VIEW.length&&(VIEW.length>0||!!$('body').querySelector('tr.fillr'));
 const freshBlank=()=>(blankRow&&mpRow===blankRow?blankRow:(blankRow=Object.assign(blankObj(),{_blank:1})));
 function toBlank(ci){
   if(LOCAL){toast('Demo mode is read-only');return false;}
