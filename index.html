@@ -83,7 +83,8 @@
   Save button — autosaves ~1s after typing stops. "+ Row" puts the cursor on
   that first blank line, in Style, whatever the search, filter or sort, so what
   is typed there is a new row and it only writes once a field has a value. With
-  no rows in view the blank lines sit under "No rows match". "+ Row" used to
+  no rows in view the blank lines sit under "No rows match". A sort, search or
+  filter changed afterwards keeps the cursor on the blank line. "+ Row" used to
   append a row that a search or filter hid and a sort moved, leaving the cursor
   on the last row in view: typing overwrote that existing row.
 
@@ -1890,6 +1891,7 @@ function passes(r,skip){
   return true;
 }
 function applyView(){
+  const blank=onBlank();
   VIEW=ROWS.filter(r=>passes(r,null));
   if(sortK){
     const t=(COLS.find(c=>c.k===sortK)||{}).t;
@@ -1899,7 +1901,10 @@ function applyView(){
       return String(A).localeCompare(String(B),undefined,{numeric:true})*sortDir;
     });
   }
-  cur.r=Math.min(cur.r,Math.max(0,VIEW.length-1));anchor=null;
+  /* on the blank line (after "+ Row" or a click there) the cursor stays on it.
+     It used to be clamped to the last row in view, so a sort, search or filter
+     change put it on an existing row and typing overwrote that row. */
+  cur.r=blank?VIEW.length:Math.min(cur.r,Math.max(0,VIEW.length-1));anchor=null;
   /* Ticks survive searching and filtering. This used to prune picked down to
      the CURRENT view, so ticking a row, searching for another and ticking that
      one silently dropped the first — the whole point of the search box is to
