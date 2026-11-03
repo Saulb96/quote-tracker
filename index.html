@@ -2549,8 +2549,11 @@ document.addEventListener('paste',e=>{
     if(!more[dr]){more[dr]=Object.assign(blankObj(),{_blank:1});more[dr]._n+=dr;}   /* not in ROWS yet: keep _n apart */
     return more[dr];
   };
-  /* pasted from a row above, the lines past the last row are left out */
-  const lost=nb?0:Math.max(0,r0+rows-VIEW.length);
+  /* pasted from a row above, the lines past the last row are left out; the
+     message counts only those with something in them (a copy from Excel can end
+     in empty lines, which lose nothing) */
+  let lost=0;
+  if(!nb)for(let dr=Math.max(0,VIEW.length-r0);dr<rows;dr++)if((grid[dr%gh]||[]).some(v=>v.trim()))lost++;
   for(let dr=0;dr<rows;dr++)for(let dc=0;dc<cols;dc++){
     const r=r0+dr,c=c0+dc;
     const line=grid[dr%gh]||[];
