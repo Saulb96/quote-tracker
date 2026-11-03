@@ -2449,7 +2449,7 @@ function setCells(changes){
   const rows=new Set();
   changes.forEach(c=>{c.row[c.k]=c.v;dirty.add(c.row._n+'|'+c.k);rows.add(c.row);});
   if(changes.some(c=>c.k==='style'))scentSync([...rows]);
-  rows.forEach(r=>{if(r._blank)takeBlank(r);});
+  rows.forEach(r=>{if(r._blank)takeBlank(r,1);});   /* drawn once, below */
   rows.forEach(r=>saveQ.add(r));queueSave(null);
   renderWindow(1);updateSide();
   if(changes.some(c=>c.k==='stage'))setTimeout(()=>applyDoneRule([...rows]),0);
@@ -2632,13 +2632,15 @@ function toBlank(ci){
   const e=cellEl(cur.r,cur.c);if(e)e.scrollIntoView({block:'nearest',inline:'nearest'});
   return true;
 }
-function takeBlank(o){
+function takeBlank(o,quiet){
   delete o._blank;if(blankRow===o)blankRow=null;
   /* it lands where it was typed and the cursor stays on it; like any edit, the
      next applyView sorts or filters it */
   ROWS.push(o);VIEW.push(o);
   $('sShown').textContent=VIEW.length;$('sTotal').textContent=ROWS.length;
-  updateSide();renderWindow(1);
+  /* quiet: setCells draws once for the whole paste. Drawing per row froze the
+     page for seconds on a long paste (300 lines on 1,300 rows: about 6 s). */
+  if(!quiet){updateSide();renderWindow(1);}
 }
 $('delRow').onclick=()=>{
   if(LOCAL){toast('Demo mode is read-only');return;}
