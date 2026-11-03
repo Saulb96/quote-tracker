@@ -1167,12 +1167,18 @@ function toast(m,ms){const t=$('toast');t.textContent=m;t.classList.add('on');
   clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('on'),ms||2200);}
 function fmtDate(v){if(!v)return"";const d=new Date(v);if(isNaN(d))return String(v);
   return (d.getUTCMonth()+1)+'/'+d.getUTCDate()+'/'+d.getUTCFullYear();}
-function toISO(s){if(!s)return"";const d=new Date(s);return isNaN(d)?"":d.toISOString().slice(0,10);}
+/* SharePoint's timestamps and yyyy-mm-dd keep the date they carry; any other
+   form (a pasted 11/4/2026) is read in the browser's own time zone and keeps its
+   day. It used to take the UTC date of that too: east of UTC (Hong Kong) local
+   midnight is still the day before in UTC, so a pasted date saved a day early. */
+function toISO(s){if(!s)return"";const d=new Date(s);if(isNaN(d))return"";
+  return /^\s*\d{4}-\d\d-\d\d/.test(String(s))?d.toISOString().slice(0,10):localISO(d);}
+function localISO(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 /* today as yyyy-mm-dd in the browser's own time zone. It used to be
    toISOString(), the UTC date: in New York that is tomorrow from 7 PM (8 PM in
    summer), so a quote added in the evening was dated the next day. */
-function todayISO(){const d=new Date();
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function todayISO(){return localISO(new Date());}
 function ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){}}
 
 /* ═══════════════════ BACKGROUND ═══════════════════ */
