@@ -3088,7 +3088,9 @@ async function patchRow(base,row,snap,out){
       if(!/^\d{3}\b/.test(e.message)){const u=row._unsure=row._unsure||{};ch.forEach(k=>u[k]=snap[k]);}
       if(!/^412\b/.test(e.message)||n>=3)throw e;stale=true;}
     if(!stale){
-      res=res||{};row._etag=res['@odata.etag']||null;
+      /* an answer without an ETag keeps the last one: a stale ETag costs a 412
+         and a read-back, and no ETag at all sent the next save without If-Match */
+      res=res||{};row._etag=res['@odata.etag']||row._etag;
       const whole=wholeItem(res),srv=spFields(res,!whole);
       if(!whole)ch.forEach(k=>{if(srv[k]===undefined)srv[k]=snap[k];});
       takeSaved(row,snap,srv,null,sent,out);delete row._unsure;
