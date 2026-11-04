@@ -105,10 +105,11 @@
   is deleted once its create comes back (it used to be created all the same and
   return on the next load), and Undo/Redo forget it. A delete SharePoint
   refuses (403, or any other error it answers with) brings the row back to the
-  grid as SharePoint has it, with a message ("HK400 was not deleted: SharePoint
-  does not let this account delete items"), as Undo's does. It used to leave
-  the row gone from the grid, the item still in the list, and "Save failed" for
-  good. With no answer at all (no network) the delete waits for the retry.
+  grid in its place, as SharePoint has it, with a message ("HK400 was not
+  deleted: SharePoint does not let this account delete items"), as Undo's
+  does. It used to leave the row gone from the grid, the item still in the
+  list, and "Save failed" for good. With no answer at all (no network) the
+  delete waits for the retry.
 
   UNDO right after making items — typed or picked on the blank line or after
   "+ Row", a paste of several lines there, Ctrl+D there — deletes them after
@@ -3201,7 +3202,9 @@ async function deleteItem(base,id,row,guard){
   if(why==='changed'&&row._base&&Object.keys(FIELD).every(k=>sameVal(k,now[k],row._base[k])))
     return deleteItem(base,id,row,false);
   Object.assign(row,now);delete row._gone;row._etag=it['@odata.etag']||null;row._base=now;
-  scentSync([row]);ROWS.push(row);
+  /* back in its place: ROWS keeps the load order (_n), new rows after. It used
+     to go to the bottom, where nobody would look for it on a long list. */
+  scentSync([row]);const i=ROWS.findIndex(x=>x._n>row._n);if(i<0)ROWS.push(row);else ROWS.splice(i,0,row);
   viewWhenIdle();
   return why;
 }
