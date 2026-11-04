@@ -3009,12 +3009,12 @@ function saveStatus(){
    page has not changed since the save began takes that value: other people's
    changes show. One this page changed meanwhile, or in an editor or picker
    opened before their value came in, keeps theirs if they changed it too, and
-   the page says so (takeSaved, commitEdit, commitMulti).
-   A 412 means someone else saved the item after _etag. It is
-   read back; what they changed and this page did not is taken, and this page's
-   fields go again with the new ETag. A field they changed that this page
-   changed too keeps their value, and the page says so: their change is never
-   overwritten. Creates still send every field. */
+   the page says so (takeSaved, commitEdit, commitMulti). A 412 means someone
+   else saved the item after _etag. It is read back; what they changed and this
+   page did not is taken, and this page's fields go again with the new ETag. A
+   field they changed that this page changed too keeps their value, and the
+   page says so: their change is never overwritten. Creates still send every
+   field. */
 /* an item's fields as SharePoint gives them, in the row's form (Date Created
    yyyy-mm-dd, as load() reads it; a field left out is empty). part: only the
    fields given */
