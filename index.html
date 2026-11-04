@@ -136,7 +136,9 @@
   while a save of the item was under way, or in an editor or picker opened
   before their value came into the grid. Done ticked over a Stage someone else
   changed keeps their Stage and does not archive the item (the Done rule's
-  Archived goes with the Stage it came from). Every save used to send the
+  Archived goes with the Stage it came from). A save whose answer was lost (no
+  network) and that landed all the same is this page's own change, not taken
+  for someone else's on the next save. Every save used to send the
   whole row, which quietly put back what others had changed since this page
   loaded. Action and Stage compare by the values they hold, Date Created by its
   day, so a reordered or reformatted value is no change. Creates send every
@@ -3046,10 +3048,16 @@ function takeSaved(row,snap,srv,keep,sent,out){
   for(const k in srv){
     if(keep&&keep.indexOf(k)>=0||sameVal(k,row[k],srv[k]))continue;
     if(sameVal(k,row[k],snap[k])){row[k]=srv[k];out.took.push(k);}
-    else if(!sameVal(k,srv[k],sent.indexOf(k)>=0?snap[k]:was[k]))lose(row,snap,k,srv,out);
+    else if(!sameVal(k,srv[k],sent.indexOf(k)>=0?snap[k]:was[k])&&!ownLost(row,k,srv))lose(row,snap,k,srv,out);
   }
   row._base=Object.assign({},was,srv);
 }
+/* A PATCH that got no answer (no network, say) may have landed: the fields it
+   sent stay in _unsure until SharePoint is next heard from, and a field that
+   then holds what it sent is this page's own change, not someone else's. It
+   used to be taken as someone else's, and this page's next change to that
+   field was dropped with "changed by someone else". */
+const ownLost=(row,k,srv)=>!!row._unsure&&k in row._unsure&&sameVal(k,srv[k],row._unsure[k]);
 /* their value (srv) is kept in k over this page's, into out.lost. The Done
    rule's Archived goes with the Stage it was made from: this page's Archived
    change that its Stage made takes SharePoint's value too, and the row goes
@@ -3065,29 +3073,34 @@ function lose(row,snap,k,srv,out){
    else's change came in on) and out.lost (fields of this page's left as they
    saved them) as it learns them, so they are known even if a later resend fails */
 async function patchRow(base,row,snap,out){
-  const sent=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k]));
+  /* a field back to _base after a PATCH that got no answer still goes: that
+     PATCH may have landed (ownLost) */
+  const un=row._unsure||{};
+  const sent=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k])||k in un&&!sameVal(k,snap[k],un[k]));
   let ch=sent.slice();
   for(let n=0;ch.length;n++){
     const f={};ch.forEach(k=>f[FIELD[k]]=wireVal(k,snap[k]));
     let res,stale=false;
     try{res=await graph(base+'/'+row._id+'/fields',{method:'PATCH',
       headers:row._etag?{'if-match':row._etag}:undefined,body:JSON.stringify(f)});}
-    catch(e){if(!/^412\b/.test(e.message)||n>=3)throw e;stale=true;}
+    catch(e){
+      if(!/^\d{3}\b/.test(e.message)){const u=row._unsure=row._unsure||{};ch.forEach(k=>u[k]=snap[k]);}
+      if(!/^412\b/.test(e.message)||n>=3)throw e;stale=true;}
     if(!stale){
       res=res||{};row._etag=res['@odata.etag']||null;
       const whole=wholeItem(res),srv=spFields(res,!whole);
       if(!whole)ch.forEach(k=>{if(srv[k]===undefined)srv[k]=snap[k];});
-      takeSaved(row,snap,srv,null,sent,out);
+      takeSaved(row,snap,srv,null,sent,out);delete row._unsure;
       break;
     }
     /* someone else saved it since _etag: read it back */
     const it=await graph(base+'/'+row._id+'?$expand=fields($select='+Object.values(FIELD).join(',')+')');
     const now=spFields(it.fields||{}),was=row._base||now;
     row._etag=it['@odata.etag']||(it.fields&&it.fields['@odata.etag'])||null;
-    const theirs=ch.filter(k=>!sameVal(k,now[k],was[k])&&!sameVal(k,now[k],snap[k]));
+    const theirs=ch.filter(k=>!sameVal(k,now[k],was[k])&&!sameVal(k,now[k],snap[k])&&!ownLost(row,k,now));
     theirs.forEach(k=>lose(row,snap,k,now,out));
     ch=ch.filter(k=>theirs.indexOf(k)<0&&!sameVal(k,now[k],snap[k]));
-    takeSaved(row,snap,now,ch,sent,out);
+    takeSaved(row,snap,now,ch,sent,out);delete row._unsure;
   }
 }
 /* "HK200: Customer was changed by someone else, so your change to it was not
