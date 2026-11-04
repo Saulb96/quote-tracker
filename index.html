@@ -2843,15 +2843,20 @@ function dropRows(gone,byUndo){
    is sent first too, and a save under way is waited for. The load empties the
    waiting deletes, so a Reload within a second of a delete brought the item
    back; and flushSave returns at once while a save is under way, so the load
-   could read the list before that save had landed. */
+   could read the list before that save had landed. What that save says (an
+   item not deleted, a change not saved) shows again with "N rows loaded": the
+   load's message used to replace it at once. */
 $('reload').onclick=async()=>{
+  const held=sayHeld=[];
   if(saveQ.size||saving||deleted.length){
     toast('Finishing save first…');
     while(saving)await new Promise(r=>setTimeout(r,150));
     await flushSave();
   }
+  sayHeld=null;
   if(saveErr&&!confirm('There is an unsaved change that failed. Reload anyway?'))return;
-  load();
+  await load();
+  if(held.length)toast(ROWS.length+' rows loaded · '+held.join(' · '),8000);
 };
 $('undo').onclick=doUndo;$('redo').onclick=doRedo;
 
@@ -2962,6 +2967,7 @@ async function retireLookup(k,item,flag){
 let saveQ=new Set(),saveTimer=null,saving=false,saveErr=null;
 const undoDel=new Map();   /* the ids in deleted that Undo deleted, to their rows (deleteItem) */
 const rowDel=new Map();    /* and those Delete row deleted */
+let sayHeld=null;          /* while Reload waits for a save: what the save says, for after the load */
 const AUTOSAVE_MS=1100;
 /* a new row's default Date Created (_date0) is not a value */
 function rowHasContent(r){return COLS.some(c=>!READONLY_T(c.t)&&(c.k==='date'
@@ -3126,7 +3132,7 @@ async function flushSave(){
     console.error('Autosave failed:',e);
   }
   if(others){redrawWhenIdle();updateSide();}
-  if(said.length)toast(said.join(' · '),said.length>1?8000:6000);
+  if(said.length){if(sayHeld)sayHeld.push(...said);toast(said.join(' · '),said.length>1?8000:6000);}
   syncBtns();
 }
 /* An item leaves SharePoint here: for Delete row (guard false, no If-Match) and
