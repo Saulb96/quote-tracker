@@ -134,7 +134,9 @@
   their value, and a message names it ("HK200: Customer was changed by someone
   else, so your change to it was not saved"); so does a field this page changed
   while a save of the item was under way, or in an editor or picker opened
-  before their value came into the grid. Every save used to send the
+  before their value came into the grid. Done ticked over a Stage someone else
+  changed keeps their Stage and does not archive the item (the Done rule's
+  Archived goes with the Stage it came from). Every save used to send the
   whole row, which quietly put back what others had changed since this page
   loaded. Action and Stage compare by the values they hold, Date Created by its
   day, so a reordered or reformatted value is no change. Creates send every
@@ -3038,16 +3040,26 @@ const wholeItem=f=>!!f&&('id' in f||'Modified' in f);
    too (it is not what this page sent, or for a field not sent, not _base):
    then theirs is taken and the field goes into lost, as on a 412. That change
    used to go out with the fresh ETag and overwrite theirs unseen.
-   Returns the fields that took one. */
-function takeSaved(row,snap,srv,keep,sent,lost){
-  const took=[],was=row._base||snap;
+   The fields that took one go into out.took. */
+function takeSaved(row,snap,srv,keep,sent,out){
+  const was=row._base||snap;
   for(const k in srv){
     if(keep&&keep.indexOf(k)>=0||sameVal(k,row[k],srv[k]))continue;
-    if(sameVal(k,row[k],snap[k])){row[k]=srv[k];took.push(k);}
-    else if(!sameVal(k,srv[k],sent.indexOf(k)>=0?snap[k]:was[k])){row[k]=srv[k];lost.push(k);}
+    if(sameVal(k,row[k],snap[k])){row[k]=srv[k];out.took.push(k);}
+    else if(!sameVal(k,srv[k],sent.indexOf(k)>=0?snap[k]:was[k]))lose(row,snap,k,srv,out);
   }
   row._base=Object.assign({},was,srv);
-  return took;
+}
+/* their value (srv) is kept in k over this page's, into out.lost. The Done
+   rule's Archived goes with the Stage it was made from: this page's Archived
+   change that its Stage made takes SharePoint's value too, and the row goes
+   back into the view (out.back). Ticking Done over someone else's Stage used to
+   archive an item that was not Done. */
+function lose(row,snap,k,srv,out){
+  const arch=v=>String(v||'').trim().toLowerCase()==='yes';
+  if(k==='stage'&&arch(row.archived)!==arch(srv.archived)&&arch(row.archived)===(tokens(row.stage).indexOf(DONE_STAGE)>=0)){
+    row.archived=snap.archived=srv.archived;out.back=true;}
+  row[k]=snap[k]=srv[k];out.lost.push(k);
 }
 /* PATCH what this page changed in a saved row; fills out.took (fields someone
    else's change came in on) and out.lost (fields of this page's left as they
@@ -3055,7 +3067,6 @@ function takeSaved(row,snap,srv,keep,sent,lost){
 async function patchRow(base,row,snap,out){
   const sent=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k]));
   let ch=sent.slice();
-  const took=out.took,lost=out.lost;
   for(let n=0;ch.length;n++){
     const f={};ch.forEach(k=>f[FIELD[k]]=wireVal(k,snap[k]));
     let res,stale=false;
@@ -3066,7 +3077,7 @@ async function patchRow(base,row,snap,out){
       res=res||{};row._etag=res['@odata.etag']||null;
       const whole=wholeItem(res),srv=spFields(res,!whole);
       if(!whole)ch.forEach(k=>{if(srv[k]===undefined)srv[k]=snap[k];});
-      took.push(...takeSaved(row,snap,srv,null,sent,lost));
+      takeSaved(row,snap,srv,null,sent,out);
       break;
     }
     /* someone else saved it since _etag: read it back */
@@ -3074,9 +3085,9 @@ async function patchRow(base,row,snap,out){
     const now=spFields(it.fields||{}),was=row._base||now;
     row._etag=it['@odata.etag']||(it.fields&&it.fields['@odata.etag'])||null;
     const theirs=ch.filter(k=>!sameVal(k,now[k],was[k])&&!sameVal(k,now[k],snap[k]));
-    theirs.forEach(k=>{row[k]=now[k];snap[k]=now[k];});lost.push(...theirs);
+    theirs.forEach(k=>lose(row,snap,k,now,out));
     ch=ch.filter(k=>theirs.indexOf(k)<0&&!sameVal(k,now[k],snap[k]));
-    took.push(...takeSaved(row,snap,now,ch,sent,lost));
+    takeSaved(row,snap,now,ch,sent,out);
   }
 }
 /* "HK200: Customer was changed by someone else, so your change to it was not
@@ -3114,6 +3125,7 @@ async function flushSave(){
         finally{
           if(r.took.length){others=true;if(r.took.indexOf('style')>=0)scentSync([row]);}
           if(r.lost.length){others=true;said.push(lostNote(row,r.lost));}
+          if(r.back)viewWhenIdle();
         }
       }
       /* changed while this save was under way (a key, an Undo), it stays queued
@@ -3177,14 +3189,16 @@ async function deleteItem(base,id,row,guard){
     return deleteItem(base,id,row,false);
   Object.assign(row,now);delete row._gone;row._etag=it['@odata.etag']||null;row._base=now;
   scentSync([row]);ROWS.push(row);
-  /* into the view once no editor is open, the cursor on the row it was on */
-  const back=()=>{
-    if(editing||$('mpick').classList.contains('open')){setTimeout(back,400);return;}
-    const at=onBlank()?null:VIEW[cur.r];applyView();
-    if(at&&VIEW.indexOf(at)>=0){cur.r=VIEW.indexOf(at);paintSel();}
-  };
-  back();
+  viewWhenIdle();
   return why;
+}
+/* a row back into the view (a refused delete; an archive the Done rule made,
+   taken back with their Stage) once no editor is open, the cursor on the row
+   it was on */
+function viewWhenIdle(){
+  if(editing||$('mpick').classList.contains('open')){setTimeout(viewWhenIdle,400);return;}
+  const at=onBlank()?null:VIEW[cur.r];applyView();
+  if(at&&VIEW.indexOf(at)>=0){cur.r=VIEW.indexOf(at);paintSel();}
 }
 /* one message for the items a save brought back for the same reason:
    "HK400 was not deleted: SharePoint does not let this account delete items" */
