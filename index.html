@@ -3049,12 +3049,13 @@ function takeSaved(row,snap,srv,keep,sent,lost){
   row._base=Object.assign({},was,srv);
   return took;
 }
-/* PATCH what this page changed in a saved row; returns {took: fields someone
-   else's change came in on, lost: fields of this page's left as they saved them} */
-async function patchRow(base,row,snap){
+/* PATCH what this page changed in a saved row; fills out.took (fields someone
+   else's change came in on) and out.lost (fields of this page's left as they
+   saved them) as it learns them, so they are known even if a later resend fails */
+async function patchRow(base,row,snap,out){
   const sent=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k]));
   let ch=sent.slice();
-  const took=[],lost=[];
+  const took=out.took,lost=out.lost;
   for(let n=0;ch.length;n++){
     const f={};ch.forEach(k=>f[FIELD[k]]=wireVal(k,snap[k]));
     let res,stale=false;
@@ -3077,7 +3078,6 @@ async function patchRow(base,row,snap){
     ch=ch.filter(k=>theirs.indexOf(k)<0&&!sameVal(k,now[k],snap[k]));
     took.push(...takeSaved(row,snap,now,ch,sent,lost));
   }
-  return {took,lost};
 }
 /* "HK200: Customer was changed by someone else, so your change to it was not
    saved"; done ('undone', 'redone'): "..., so it was not undone" (replay) */
@@ -3093,7 +3093,9 @@ async function flushSave(){
      an item SharePoint refused to create, say), so "Save failed" goes too */
   if(!saveQ.size&&!deleted.length){saveErr=null;saveStatus();return;}
   saving=true;saveErr=null;saveStatus();
-  const batch=[...saveQ],dels=deleted.slice(),said=[];let others=false;
+  /* kept: the rows deleteItem brought back, by why. What a save learns is said
+     even when a later step of it fails; it used to be dropped with the error. */
+  const batch=[...saveQ],dels=deleted.slice(),said=[],kept={};let others=false;
   try{
     await resolveList();
     const base='https://graph.microsoft.com/v1.0/sites/'+siteId+'/lists/'+listId+'/items';
@@ -3107,23 +3109,24 @@ async function flushSave(){
         row._id=res.id;row._etag=res&&res['@odata.etag']||null;row._base=snap;
         if(row._gone){deleted.push(row._id);(row._gone==='undo'?undoDel:rowDel).set(row._id,row);}   /* deleted while it was being created */
       }else{
-        const r=await patchRow(base,row,snap);
-        if(r.took.length){others=true;if(r.took.indexOf('style')>=0)scentSync([row]);}
-        if(r.lost.length){others=true;said.push(lostNote(row,r.lost));}
+        const r={took:[],lost:[]};
+        try{await patchRow(base,row,snap,r);}
+        finally{
+          if(r.took.length){others=true;if(r.took.indexOf('style')>=0)scentSync([row]);}
+          if(r.lost.length){others=true;said.push(lostNote(row,r.lost));}
+        }
       }
       /* changed while this save was under way (a key, an Undo), it stays queued
          for the next autosave. It used to come off the queue here: the change was
          never sent, and the page still said "All changes saved". */
       if(Object.keys(FIELD).every(k=>sameVal(k,row[k],row._base[k]))){saveQ.delete(row);undirty(row);}
     }
-    const kept={};   /* the rows deleteItem brought back, by why */
     for(const id of dels){
       const mine=undoDel.get(id),row=mine||rowDel.get(id);
       const why=row?await deleteItem(base,id,row,!!mine):(await graph(base+'/'+id,{method:'DELETE'}),'');
       if(why)(kept[why]=kept[why]||[]).push(row);
       deleted=deleted.filter(x=>x!==id);undoDel.delete(id);rowDel.delete(id);
     }
-    for(const why in kept)said.push(keptNote(why,kept[why]));
     saving=false;
     redrawWhenIdle();   /* clears the saved cells' pending marks */
     if(saveQ.size||deleted.length)queueSave(null);else saveStatus();
@@ -3131,6 +3134,7 @@ async function flushSave(){
     saving=false;saveErr=e.message;saveStatus();
     console.error('Autosave failed:',e);
   }
+  for(const why in kept)said.push(keptNote(why,kept[why]));
   if(others){redrawWhenIdle();updateSide();}
   if(said.length){if(sayHeld)sayHeld.push(...said);toast(said.join(' · '),said.length>1?8000:6000);}
   syncBtns();
