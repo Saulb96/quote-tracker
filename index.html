@@ -130,7 +130,9 @@
   else saved it first) reads the item back and sends this page's fields again
   with the new ETag. A field they changed that this page changed too keeps
   their value, and a message names it ("HK200: Customer was changed by someone
-  else, so your change to it was not saved"). Every save used to send the
+  else, so your change to it was not saved"); so does a field this page changed
+  while a save of the item was under way, or in an editor or picker opened
+  before their value came into the grid. Every save used to send the
   whole row, which quietly put back what others had changed since this page
   loaded. Action and Stage compare by the values they hold, Date Created by its
   day, so a reordered or reformatted value is no change. Creates send every
@@ -2365,9 +2367,9 @@ document.addEventListener('keydown',e=>{
 });
 
 /* ═══════════════════ EDITING ═══════════════════ */
-let mpRow=null,mpKey=null;
+let mpRow=null,mpKey=null,mpWas='';
 function openMulti(row,k,td){
-  mpRow=row;mpKey=k;
+  mpRow=row;mpKey=k;mpWas=row[k]||'';
   const col=COLS.find(c=>c.k===k);
   const on=new Set(tokens(row[k]));
   const opts=(CHOICES[k]||[]).slice();
@@ -2384,8 +2386,12 @@ function commitMulti(){
   if(!mpRow)return;
   const picked=[...$('mpList').querySelectorAll('input')].filter(b=>b.checked).map(b=>b.value);
   const nv=joinTokens(picked);
-  const changed=nv!==(mpRow[mpKey]||'');
+  let changed=nv!==(mpRow[mpKey]||'');
   const row=mpRow,key=mpKey;
+  /* someone else's value came in while the picker was open (as commitEdit) */
+  if(!row._blank&&!sameVal(key,row[key],mpWas)){
+    if(!sameVal(key,nv,mpWas)&&!sameVal(key,nv,row[key]))toast(lostNote(row,[key]),6000);
+    changed=false;}
   if(changed)setCell(row,key,nv,true);
   $('mpick').classList.remove('open');
   mpRow=null;mpKey=null;
@@ -2501,7 +2507,12 @@ function commitEdit(){
   const col=COLS[cur.c],row=onBlank()?blankRow:VIEW[cur.r],nv=editEl?editEl.value:editPrev;
   const vi=cur.r,ci=cur.c;
   editing=false;editEl=null;
-  const changed=!!row&&String(nv)!==String(editPrev||'');
+  let changed=!!row&&String(nv)!==String(editPrev||'');
+  /* the value under the editor changed while it was open: a save's answer
+     brought someone else's in (takeSaved). Theirs stays and the page says so;
+     Enter used to save over it. */
+  if(changed&&!row._blank&&!sameVal(col.k,row[col.k],editPrev)){
+    changed=false;if(!sameVal(col.k,row[col.k],nv))toast(lostNote(row,[col.k]),6000);}
   if(changed)setCell(row,col.k,nv,true);
   patchCell(vi,ci);
   if(changed&&(col.k==='category'||col.k==='style'||col.k==='desc'))
@@ -2971,7 +2982,10 @@ function saveStatus(){
    the item went back to this page's old value without a word. SharePoint
    answers with the item as it now is, which becomes _base, and a field this
    page has not changed since the save began takes that value: other people's
-   changes show. A 412 means someone else saved the item after _etag. It is
+   changes show. One this page changed meanwhile, or in an editor or picker
+   opened before their value came in, keeps theirs if they changed it too, and
+   the page says so (takeSaved, commitEdit, commitMulti).
+   A 412 means someone else saved the item after _etag. It is
    read back; what they changed and this page did not is taken, and this page's
    fields go again with the new ETag. A field they changed that this page
    changed too keeps their value, and the page says so: their change is never
@@ -2998,19 +3012,28 @@ const wireVal=(k,v)=>k==='date'?(v?new Date(v+'T12:00:00Z').toISOString():null):
 const wholeItem=f=>!!f&&('id' in f||'Modified' in f);
 /* srv (some or all of the item's fields as SharePoint now has them) becomes the
    row's _base. A field the row still holds as it did when the save began
-   (snap), and is not about to send again (keep), takes SharePoint's value.
+   (snap), and is not about to send again (keep), takes SharePoint's value. One
+   this page changed while the save was under way keeps that change for the
+   next save, unless SharePoint's value shows someone else changed the field
+   too (it is not what this page sent, or for a field not sent, not _base):
+   then theirs is taken and the field goes into lost, as on a 412. That change
+   used to go out with the fresh ETag and overwrite theirs unseen.
    Returns the fields that took one. */
-function takeSaved(row,snap,srv,keep){
-  const took=[];
-  for(const k in srv)if((!keep||keep.indexOf(k)<0)&&sameVal(k,row[k],snap[k])&&!sameVal(k,row[k],srv[k])){
-    row[k]=srv[k];took.push(k);}
-  row._base=Object.assign({},row._base||snap,srv);
+function takeSaved(row,snap,srv,keep,sent,lost){
+  const took=[],was=row._base||snap;
+  for(const k in srv){
+    if(keep&&keep.indexOf(k)>=0||sameVal(k,row[k],srv[k]))continue;
+    if(sameVal(k,row[k],snap[k])){row[k]=srv[k];took.push(k);}
+    else if(!sameVal(k,srv[k],sent.indexOf(k)>=0?snap[k]:was[k])){row[k]=srv[k];lost.push(k);}
+  }
+  row._base=Object.assign({},was,srv);
   return took;
 }
 /* PATCH what this page changed in a saved row; returns {took: fields someone
    else's change came in on, lost: fields of this page's left as they saved them} */
 async function patchRow(base,row,snap){
-  let ch=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k]));
+  const sent=Object.keys(FIELD).filter(k=>!row._base||!sameVal(k,snap[k],row._base[k]));
+  let ch=sent.slice();
   const took=[],lost=[];
   for(let n=0;ch.length;n++){
     const f={};ch.forEach(k=>f[FIELD[k]]=wireVal(k,snap[k]));
@@ -3022,7 +3045,7 @@ async function patchRow(base,row,snap){
       res=res||{};row._etag=res['@odata.etag']||null;
       const whole=wholeItem(res),srv=spFields(res,!whole);
       if(!whole)ch.forEach(k=>{if(srv[k]===undefined)srv[k]=snap[k];});
-      took.push(...takeSaved(row,snap,srv));
+      took.push(...takeSaved(row,snap,srv,null,sent,lost));
       break;
     }
     /* someone else saved it since _etag: read it back */
@@ -3032,7 +3055,7 @@ async function patchRow(base,row,snap){
     const theirs=ch.filter(k=>!sameVal(k,now[k],was[k])&&!sameVal(k,now[k],snap[k]));
     theirs.forEach(k=>{row[k]=now[k];snap[k]=now[k];});lost.push(...theirs);
     ch=ch.filter(k=>theirs.indexOf(k)<0&&!sameVal(k,now[k],snap[k]));
-    took.push(...takeSaved(row,snap,now,ch));
+    took.push(...takeSaved(row,snap,now,ch,sent,lost));
   }
   return {took,lost};
 }
